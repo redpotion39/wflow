@@ -97,6 +97,8 @@ pub struct WisprFlowGui {
     animation_time: f32,
     recording_start: Option<Instant>,
     fonts_initialized: bool,
+    logo_texture: Option<egui::TextureHandle>,
+    window_icon_applied: bool,
 }
 
 pub const POPULAR_HOTKEYS: &[(&str, u16)] = &[
@@ -191,6 +193,8 @@ impl WisprFlowGui {
             animation_time: 0.0,
             recording_start: None,
             fonts_initialized: false,
+            logo_texture: None,
+            window_icon_applied: false,
         }
     }
 
@@ -319,6 +323,26 @@ impl eframe::App for WisprFlowGui {
             self.fonts_initialized = true;
         }
 
+        if self.logo_texture.is_none() {
+            if let Ok(img) = image::load_from_memory(include_bytes!("../assets/icon_256.png")) {
+                let rgba = img.into_rgba8();
+                let (w, h) = rgba.dimensions();
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [w as usize, h as usize],
+                    &rgba.into_raw(),
+                );
+                self.logo_texture = Some(ctx.load_texture("wispr_flow_app_logo", color_image, egui::TextureOptions::LINEAR));
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        if !self.window_icon_applied {
+            crate::platform::windows::PlatformManager::apply_window_icon(
+                crate::platform::windows::PlatformManager::get_app_icon(1)
+            );
+            self.window_icon_applied = true;
+        }
+
         // Handle recorded key from low-level hook
         if let Ok(mut lock) = self.state.recorded_key.lock() {
             if let Some((mode, vk)) = lock.take() {
@@ -431,25 +455,40 @@ impl WisprFlowGui {
             .inner_margin(egui::Margin::symmetric(14.0, 10.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    // Logo Icon with glowing indigo container
-                    let (logo_rect, _) = ui.allocate_exact_size(Vec2::new(36.0, 36.0), Sense::hover());
-                    ui.painter().rect_filled(
-                        logo_rect,
-                        Rounding::same(10.0),
-                        Color32::from_rgb(49, 46, 129),
-                    );
-                    ui.painter().rect_stroke(
-                        logo_rect,
-                        Rounding::same(10.0),
-                        Stroke::new(1.5_f32, Color32::from_rgb(99, 102, 241)),
-                    );
-                    ui.painter().text(
-                        logo_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "🎙️",
-                        FontId::proportional(18.0),
-                        Color32::WHITE,
-                    );
+                    // Logo Icon: Render the stunning custom Wispr Flow icon artwork
+                    let (logo_rect, _) = ui.allocate_exact_size(Vec2::new(38.0, 38.0), Sense::hover());
+                    if let Some(texture) = &self.logo_texture {
+                        // Soft glow container around icon
+                        ui.painter().rect_filled(
+                            logo_rect.expand(1.5),
+                            Rounding::same(10.0),
+                            Color32::from_rgba_premultiplied(99, 102, 241, 45),
+                        );
+                        ui.painter().image(
+                            texture.id(),
+                            logo_rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    } else {
+                        ui.painter().rect_filled(
+                            logo_rect,
+                            Rounding::same(10.0),
+                            Color32::from_rgb(49, 46, 129),
+                        );
+                        ui.painter().rect_stroke(
+                            logo_rect,
+                            Rounding::same(10.0),
+                            Stroke::new(1.5_f32, Color32::from_rgb(99, 102, 241)),
+                        );
+                        ui.painter().text(
+                            logo_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "🎙️",
+                            FontId::proportional(18.0),
+                            Color32::WHITE,
+                        );
+                    }
 
                     ui.add_space(6.0);
 

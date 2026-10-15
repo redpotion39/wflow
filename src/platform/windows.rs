@@ -6,7 +6,7 @@ use tracing::{error, info, warn};
 use windows::core::Interface;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
+    BeginPaint, BitBlt, CreateBitmap, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
     CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, InvalidateRect,
     RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TextOutW, FW_BOLD, FW_NORMAL,
     PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT,
@@ -24,15 +24,15 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NOTIFYICONDATAW, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIF_ICON, NIF_MESSAGE, NIF_TIP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CallNextHookEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+    AppendMenuW, CallNextHookEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DispatchMessageW, EnumWindows, FindWindowW, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
     GetMessageW, GetSystemMetrics, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, KillTimer,
-    LoadIconW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowPos, SetWindowsHookExW,
-    ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, HICON, HWND_TOP, IDI_APPLICATION,
-    KBDLLHOOKSTRUCT, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL,
-    WINDOW_EX_STYLE, WM_APP, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
-    WM_PAINT, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
+    LoadIconW, LoadImageW, PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos, SetWindowsHookExW,
+    ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, HICON, HWND_TOP, ICONINFO, IDI_APPLICATION,
+    IMAGE_ICON, KBDLLHOOKSTRUCT, LR_DEFAULTCOLOR, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN, SM_CXSMICON, SM_CYSCREEN, SM_CYSMICON,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_APP, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
+    WM_PAINT, WM_RBUTTONUP, WM_SETICON, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
 };
 
@@ -481,18 +481,121 @@ impl PlatformManager {
         }
     }
 
+    /// Converts embedded PNG bytes directly into a native Win32 32-bit ARGB HICON with alpha
+    pub fn create_hicon_from_png_bytes(png_bytes: &[u8]) -> Option<HICON> {
+        let img = image::load_from_memory(png_bytes).ok()?.into_rgba8();
+        let (width, height) = img.dimensions();
+
+        let mut bgra = Vec::with_capacity((width * height * 4) as usize);
+        for pixel in img.pixels() {
+            bgra.push(pixel[2]); // B
+            bgra.push(pixel[1]); // G
+            bgra.push(pixel[0]); // R
+            bgra.push(pixel[3]); // A
+        }
+
+        unsafe {
+            let hbm_color = CreateBitmap(
+                width as i32,
+                height as i32,
+                1,
+                32,
+                Some(bgra.as_ptr() as *const _),
+            );
+            if hbm_color.is_invalid() {
+                return None;
+            }
+
+            let mask_bytes_len = (((width + 15) / 16) * 2 * height) as usize;
+            let mask_data = vec![0u8; mask_bytes_len];
+            let hbm_mask = CreateBitmap(
+                width as i32,
+                height as i32,
+                1,
+                1,
+                Some(mask_data.as_ptr() as *const _),
+            );
+            if hbm_mask.is_invalid() {
+                let _ = DeleteObject(hbm_color);
+                return None;
+            }
+
+            let mut icon_info = ICONINFO {
+                fIcon: true.into(),
+                xHotspot: 0,
+                yHotspot: 0,
+                hbmMask: hbm_mask,
+                hbmColor: hbm_color,
+            };
+
+            let hicon = CreateIconIndirect(&mut icon_info).ok();
+
+            let _ = DeleteObject(hbm_color);
+            let _ = DeleteObject(hbm_mask);
+
+            hicon
+        }
+    }
+
     /// Loads an icon embedded in the PE resource section (1: App Icon, 2: Recording Icon),
-    /// or falls back to IDI_APPLICATION if not found.
+    /// with multi-resolution DPI scaling via LoadImageW, and guaranteed memory fallback via pure PNG decode.
     pub fn get_app_icon(resource_id: u16) -> HICON {
         unsafe {
             if let Ok(hmodule) = GetModuleHandleW(None) {
+                let sm_cx = GetSystemMetrics(SM_CXSMICON);
+                let sm_cy = GetSystemMetrics(SM_CYSMICON);
+                if let Ok(handle) = LoadImageW(
+                    hmodule,
+                    windows::core::PCWSTR(resource_id as usize as *const u16),
+                    IMAGE_ICON,
+                    sm_cx,
+                    sm_cy,
+                    LR_DEFAULTCOLOR,
+                ) {
+                    let icon = HICON(handle.0);
+                    if !icon.is_invalid() && icon.0 != std::ptr::null_mut() {
+                        return icon;
+                    }
+                }
                 if let Ok(icon) = LoadIconW(hmodule, windows::core::PCWSTR(resource_id as usize as *const u16)) {
                     if !icon.is_invalid() && icon.0 != std::ptr::null_mut() {
                         return icon;
                     }
                 }
             }
+
+            // Guaranteed in-memory fallback using embedded crisp PNG:
+            let png_bytes = if resource_id == 2 {
+                include_bytes!("../../assets/tray_rec_32.png").as_slice()
+            } else {
+                include_bytes!("../../assets/tray_32.png").as_slice()
+            };
+
+            if let Some(icon) = Self::create_hicon_from_png_bytes(png_bytes) {
+                return icon;
+            }
+
             LoadIconW(None, IDI_APPLICATION).unwrap_or_default()
+        }
+    }
+
+    /// Sets the native Win32 window icon for the main GUI window
+    pub fn apply_window_icon(icon: HICON) {
+        unsafe {
+            if let Some(hwnd) = Self::find_main_window_hwnd() {
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    WPARAM(1), // ICON_BIG
+                    LPARAM(icon.0 as isize),
+                );
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    WPARAM(0), // ICON_SMALL
+                    LPARAM(icon.0 as isize),
+                );
+            }
         }
     }
 
