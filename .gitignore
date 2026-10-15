@@ -3,4 +3,5 @@
 *.json
 *.log
 !Cargo.lock
+/dist
 
