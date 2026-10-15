@@ -21,7 +21,7 @@ impl SttProvider {
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::WisprFlow => "Wispr Flow (gRPC Native)",
-            Self::Groq => "Groq Cloud (Whisper v3 Turbo)",
+            Self::Groq => "Groq Cloud (Whisper LPU)",
             Self::ElevenLabs => "ElevenLabs (Scribe STT)",
         }
     }

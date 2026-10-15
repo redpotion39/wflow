@@ -243,7 +243,29 @@ impl WisprFlowGui {
             }
         }
 
-        // 3. Windows Native Emoji font (seguiemj.ttf)
+        // 3. Japanese & CJK font candidates (Yu Gothic, MS Gothic, Meiryo, Microsoft YaHei)
+        let cjk_candidates = [
+            font_dir.join("YuGothM.ttc"),
+            font_dir.join("YuGothR.ttc"),
+            font_dir.join("msgothic.ttc"),
+            font_dir.join("meiryo.ttc"),
+            font_dir.join("msyh.ttc"),
+        ];
+        let mut loaded_cjk = false;
+        for path in &cjk_candidates {
+            if path.exists() {
+                if let Ok(bytes) = std::fs::read(path) {
+                    fonts.font_data.insert(
+                        "cjk_font".to_owned(),
+                        egui::FontData::from_owned(bytes),
+                    );
+                    loaded_cjk = true;
+                    break;
+                }
+            }
+        }
+
+        // 4. Windows Native Emoji font (seguiemj.ttf)
         let emoji_path = font_dir.join("seguiemj.ttf");
         if emoji_path.exists() {
             if let Ok(bytes) = std::fs::read(&emoji_path) {
@@ -254,14 +276,16 @@ impl WisprFlowGui {
             }
         }
 
-        // Configure font fallback priority
+        // Configure font fallback priority: English/Latin -> Thai -> Japanese/CJK -> Emoji
         if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
             if loaded_segoe {
                 family.insert(0, "segoe_ui".to_owned());
             }
             if loaded_thai {
-                let idx = if loaded_segoe { 1 } else { 0 };
-                family.insert(idx, "thai_font".to_owned());
+                family.push("thai_font".to_owned());
+            }
+            if loaded_cjk {
+                family.push("cjk_font".to_owned());
             }
             family.push("segoe_emoji".to_owned());
         }
@@ -270,9 +294,12 @@ impl WisprFlowGui {
             if loaded_thai {
                 family.push("thai_font".to_owned());
             }
+            if loaded_cjk {
+                family.push("cjk_font".to_owned());
+            }
         }
 
-        if loaded_thai || loaded_segoe {
+        if loaded_thai || loaded_segoe || loaded_cjk {
             ctx.set_fonts(fonts);
         }
     }
@@ -515,15 +542,16 @@ impl WisprFlowGui {
                                 Color32::from_rgba_unmultiplied(99, 102, 241, 40),
                             );
 
-                            // Active STT Engine Badge
-                            let current_provider = self.state.config.lock().unwrap().stt_provider;
-                            let (p_icon, p_name, p_color) = match current_provider {
-                                SttProvider::WisprFlow => ("⚡", "Wispr Flow Cloud", Color32::from_rgb(129, 140, 248)),
-                                SttProvider::Groq => ("🚀", "Groq Whisper LPU", Color32::from_rgb(251, 146, 60)),
-                                SttProvider::ElevenLabs => ("🎙️", "ElevenLabs Scribe", Color32::from_rgb(192, 132, 252)),
+                            // Active STT Engine & Model Badge
+                            let cfg = self.state.config.lock().unwrap();
+                            let current_provider = cfg.stt_provider;
+                            let (p_icon, p_name, p_model, p_color) = match current_provider {
+                                SttProvider::WisprFlow => ("⚡", "Wispr Flow", "Cloud Native (gRPC)", Color32::from_rgb(129, 140, 248)),
+                                SttProvider::Groq => ("🚀", "Groq LPU", cfg.groq_model.as_str(), Color32::from_rgb(251, 146, 60)),
+                                SttProvider::ElevenLabs => ("🎙️", "ElevenLabs", cfg.elevenlabs_model.as_str(), Color32::from_rgb(192, 132, 252)),
                             };
                             let prov_badge = ui.label(
-                                egui::RichText::new(format!("{} {}", p_icon, p_name))
+                                egui::RichText::new(format!("{} {} • {}", p_icon, p_name, p_model))
                                     .font(FontId::proportional(11.0))
                                     .color(p_color)
                                     .strong(),
@@ -880,6 +908,60 @@ impl WisprFlowGui {
                                     });
                             }
                         }
+                    });
+
+                ui.add_space(10.0);
+
+                // Active STT Pipeline & Model Status Card
+                let (prov_title, model_name, prov_color) = {
+                    let cfg = self.state.config.lock().unwrap();
+                    match cfg.stt_provider {
+                        SttProvider::WisprFlow => ("Wispr Flow Cloud".to_string(), "Native Stream (gRPC)".to_string(), Color32::from_rgb(129, 140, 248)),
+                        SttProvider::Groq => ("Groq Cloud LPU".to_string(), cfg.groq_model.clone(), Color32::from_rgb(251, 146, 60)),
+                        SttProvider::ElevenLabs => ("ElevenLabs".to_string(), cfg.elevenlabs_model.clone(), Color32::from_rgb(192, 132, 252)),
+                    }
+                };
+
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(17, 23, 36))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
+                    .rounding(Rounding::same(14.0))
+                    .inner_margin(egui::Margin::same(14.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("⚡  ACTIVE AI SPEECH ENGINE & MODEL")
+                                    .font(FontId::proportional(12.0))
+                                    .color(Color32::from_rgb(148, 163, 184))
+                                    .strong(),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("⚙️ Switch Model").clicked() {
+                                    self.active_tab = ActiveTab::Settings;
+                                }
+                            });
+                        });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            let tag = ui.label(
+                                egui::RichText::new(format!("● {}", prov_title))
+                                    .font(FontId::proportional(12.0))
+                                    .color(prov_color)
+                                    .strong(),
+                            );
+                            ui.painter().rect_filled(
+                                tag.rect.expand(3.0),
+                                Rounding::same(6.0),
+                                Color32::from_rgba_unmultiplied(prov_color.r(), prov_color.g(), prov_color.b(), 35),
+                            );
+
+                            ui.label(
+                                egui::RichText::new(format!("Model: {}", model_name))
+                                    .font(FontId::proportional(12.5))
+                                    .color(Color32::WHITE)
+                                    .strong(),
+                            );
+                        });
                     });
             });
 
@@ -1395,10 +1477,12 @@ impl WisprFlowGui {
                     ui.add_space(10.0);
 
                     // 3 Provider Cards
+                    let groq_desc = format!("Model: {}", self.settings_groq_model);
+                    let eleven_desc = format!("Model: {}", self.settings_elevenlabs_model);
                     let providers = [
-                        (SttProvider::WisprFlow, "⚡ Wispr Flow", "Native gRPC Protobuf streaming", Color32::from_rgb(99, 102, 241)),
-                        (SttProvider::Groq, "🚀 Groq Whisper", "Ultra-fast LPU Whisper v3 Turbo", Color32::from_rgb(249, 115, 22)),
-                        (SttProvider::ElevenLabs, "🎙️ ElevenLabs", "State-of-the-art Scribe STT", Color32::from_rgb(168, 85, 247)),
+                        (SttProvider::WisprFlow, "⚡ Wispr Flow", "Native gRPC Protobuf streaming".to_string(), Color32::from_rgb(99, 102, 241)),
+                        (SttProvider::Groq, "🚀 Groq Whisper", groq_desc, Color32::from_rgb(249, 115, 22)),
+                        (SttProvider::ElevenLabs, "🎙️ ElevenLabs", eleven_desc, Color32::from_rgb(168, 85, 247)),
                     ];
 
                     ui.columns(3, |pcols| {
@@ -1424,7 +1508,7 @@ impl WisprFlowGui {
                                             self.settings_stt_provider = *p;
                                         }
                                         ui.label(
-                                            egui::RichText::new(*desc)
+                                            egui::RichText::new(desc)
                                                 .font(FontId::proportional(10.5))
                                                 .color(Color32::from_rgb(148, 163, 184)),
                                         );
@@ -1464,19 +1548,30 @@ impl WisprFlowGui {
 
                             ui.add_space(8.0);
                             ui.label("Groq Whisper Model:");
+                            let groq_selected_label = match self.settings_groq_model.as_str() {
+                                "whisper-large-v3" => "whisper-large-v3 (Full accuracy, multilingual)",
+                                "whisper-large-v3-turbo" => "whisper-large-v3-turbo (Ultra-fast LPU, multilingual)",
+                                "distil-whisper-large-v3-en" => "distil-whisper-large-v3-en (English only, ultra-light)",
+                                other => other,
+                            };
                             egui::ComboBox::from_id_salt("groq_model_combo")
-                                .selected_text(&self.settings_groq_model)
+                                .selected_text(groq_selected_label)
                                 .show_ui(ui, |ui| {
-                                    let models = [
-                                        ("whisper-large-v3-turbo", "whisper-large-v3-turbo (Ultra-fast LPU, multilingual) [Recommended]"),
-                                        ("whisper-large-v3", "whisper-large-v3 (Full accuracy, multilingual)"),
-                                        ("distil-whisper-large-v3-en", "distil-whisper-large-v3-en (English only, ultra-light)"),
-                                    ];
-                                    for (m, desc) in models {
-                                        if ui.selectable_label(self.settings_groq_model == m, desc).clicked() {
-                                            self.settings_groq_model = m.to_string();
-                                        }
-                                    }
+                                    ui.selectable_value(
+                                        &mut self.settings_groq_model,
+                                        "whisper-large-v3-turbo".to_string(),
+                                        "whisper-large-v3-turbo (Ultra-fast LPU, multilingual) [Recommended]",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.settings_groq_model,
+                                        "whisper-large-v3".to_string(),
+                                        "whisper-large-v3 (Full accuracy, multilingual)",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.settings_groq_model,
+                                        "distil-whisper-large-v3-en".to_string(),
+                                        "distil-whisper-large-v3-en (English only, ultra-light)",
+                                    );
                                 });
                             ui.label(
                                 egui::RichText::new("⚡ Groq executes Whisper on LPUs with near-zero latency (~200ms per utterance).")
@@ -1495,17 +1590,18 @@ impl WisprFlowGui {
 
                             ui.add_space(8.0);
                             ui.label("ElevenLabs STT Model:");
+                            let eleven_selected_label = match self.settings_elevenlabs_model.as_str() {
+                                "scribe_v1" => "scribe_v1 (State-of-the-art multilingual STT)",
+                                other => other,
+                            };
                             egui::ComboBox::from_id_salt("elevenlabs_model_combo")
-                                .selected_text(&self.settings_elevenlabs_model)
+                                .selected_text(eleven_selected_label)
                                 .show_ui(ui, |ui| {
-                                    let models = [
-                                        ("scribe_v1", "scribe_v1 (State-of-the-art multilingual STT) [Recommended]"),
-                                    ];
-                                    for (m, desc) in models {
-                                        if ui.selectable_label(self.settings_elevenlabs_model == m, desc).clicked() {
-                                            self.settings_elevenlabs_model = m.to_string();
-                                        }
-                                    }
+                                    ui.selectable_value(
+                                        &mut self.settings_elevenlabs_model,
+                                        "scribe_v1".to_string(),
+                                        "scribe_v1 (State-of-the-art multilingual STT) [Recommended]",
+                                    );
                                 });
                             ui.label(
                                 egui::RichText::new("🎙️ ElevenLabs Scribe STT provides unmatched speech recognition accuracy across languages.")
@@ -1611,6 +1707,9 @@ impl WisprFlowGui {
                     },
                 };
 
+                if let Ok(mut lock) = self.state.config.lock() {
+                    *lock = new_config.clone();
+                }
                 let _ = self.event_tx.send(GuiEvent::SaveConfig(new_config));
                 self.state.set_toast("Settings & STT configurations saved successfully!");
             }
@@ -1651,3 +1750,4 @@ impl WisprFlowGui {
         }
     }
 }
+
