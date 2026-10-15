@@ -7,9 +7,9 @@ use windows::core::Interface;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
-    CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, InvalidateRect, RoundRect, SelectObject,
-    SetBkMode, SetTextColor, TextOutW, FW_BOLD, FW_NORMAL, PAINTSTRUCT, PS_NULL, PS_SOLID,
-    SRCCOPY, TRANSPARENT,
+    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, InvalidateRect,
+    RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TextOutW, FW_BOLD, FW_NORMAL,
+    PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 use windows::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
@@ -354,8 +354,8 @@ impl PlatformManager {
 
             let screen_w = GetSystemMetrics(SM_CXSCREEN);
             let screen_h = GetSystemMetrics(SM_CYSCREEN);
-            let hud_w = 265;
-            let hud_h = 56;
+            let hud_w = 280;
+            let hud_h = 58;
             let hud_x = (screen_w - hud_w) / 2;
             let hud_y = screen_h - hud_h - 75;
 
@@ -367,6 +367,9 @@ impl PlatformManager {
                 hud_x, hud_y, hud_w, hud_h,
                 None, None, None, None,
             ).unwrap_or_default();
+
+            let rgn = CreateRoundRectRgn(0, 0, hud_w + 1, hud_h + 1, 28, 28);
+            let _ = SetWindowRgn(hud_hwnd, rgn, true);
 
             HUD_HWND.store(hud_hwnd.0 as isize, Ordering::SeqCst);
 
@@ -773,13 +776,13 @@ unsafe extern "system" fn hud_wnd_proc(
             let mem_bmp = CreateCompatibleBitmap(hdc, width, height);
             let old_bmp = SelectObject(mem_dc, mem_bmp);
 
-            // 1. Draw rounded dark card pill (RGB: 16, 20, 32 -> 0x00201410)
-            let card_brush = CreateSolidBrush(COLORREF(0x00201410));
-            let card_pen = CreatePen(PS_SOLID, 1, COLORREF(0x00523C32)); // Border RGB: 50, 60, 82
+            // 1. Draw rounded dark glass capsule
+            let card_brush = CreateSolidBrush(COLORREF(0x001B120B)); // Deep obsidian slate
+            let card_pen = CreatePen(PS_SOLID, 1, COLORREF(0x004A3622)); // Subtle glass border
             let old_brush = SelectObject(mem_dc, card_brush);
             let old_pen = SelectObject(mem_dc, card_pen);
 
-            let _ = RoundRect(mem_dc, 1, 1, width - 1, height - 1, 26, 26);
+            let _ = RoundRect(mem_dc, 0, 0, width, height, 28, 28);
 
             let _ = SelectObject(mem_dc, old_brush);
             let _ = SelectObject(mem_dc, old_pen);
@@ -792,61 +795,87 @@ unsafe extern "system" fn hud_wnd_proc(
 
             let _ = SetBkMode(mem_dc, TRANSPARENT);
 
-            // 2. Left indicator dot & label
-            let (dot_color, label_text) = match state {
-                1 => {
-                    let pulse = (tick as f32 * 0.2).sin().abs();
-                    let red = (200.0 + pulse * 55.0) as u32;
-                    (COLORREF(red), "Listening...")
-                }
-                2 => (COLORREF(0x00F755A8), "Transcribing..."),
-                3 => (COLORREF(0x0045DC22), "Inserted!"),
-                _ => (COLORREF(0x00888888), "Ready"),
+            // 2. Left indicator with pulsing aura & status text
+            let (core_color, aura_color, label_text) = match state {
+                1 => (
+                    COLORREF(0x003344FF), // Bright coral red
+                    COLORREF(0x001E1E66), // Soft red aura
+                    "Listening...",
+                ),
+                2 => (
+                    COLORREF(0x00F755A8), // Bright lavender violet
+                    COLORREF(0x00662244), // Soft violet aura
+                    "Transcribing...",
+                ),
+                3 => (
+                    COLORREF(0x0033DD33), // Emerald green
+                    COLORREF(0x001E551E), // Soft green aura
+                    "Inserted!",
+                ),
+                _ => (
+                    COLORREF(0x00888888),
+                    COLORREF(0x00333333),
+                    "Ready",
+                ),
             };
 
-            // Dot circle
-            let dot_brush = CreateSolidBrush(dot_color);
             let null_pen = CreatePen(PS_NULL, 0, COLORREF(0));
-            let old_brush2 = SelectObject(mem_dc, dot_brush);
-            let old_pen2 = SelectObject(mem_dc, null_pen);
+            let old_pen_prev = SelectObject(mem_dc, null_pen);
 
-            let dot_radius = if state == 1 {
-                5 + ((tick as f32 * 0.25).sin().abs() * 2.0) as i32
-            } else {
-                5
-            };
+            // Draw outer aura ring when active
+            if state == 1 || state == 2 {
+                let pulse = (tick as f32 * 0.22).sin().abs();
+                let aura_r = 7 + (pulse * 3.5) as i32;
+                let aura_brush = CreateSolidBrush(aura_color);
+                let old_b = SelectObject(mem_dc, aura_brush);
+                let _ = RoundRect(
+                    mem_dc,
+                    19 - aura_r,
+                    29 - aura_r,
+                    19 + aura_r,
+                    29 + aura_r,
+                    aura_r * 2,
+                    aura_r * 2,
+                );
+                let _ = SelectObject(mem_dc, old_b);
+                let _ = DeleteObject(aura_brush);
+            }
+
+            // Draw inner core circle
+            let core_r = 4;
+            let core_brush = CreateSolidBrush(core_color);
+            let old_b2 = SelectObject(mem_dc, core_brush);
             let _ = RoundRect(
                 mem_dc,
-                18 - dot_radius,
-                28 - dot_radius,
-                18 + dot_radius,
-                28 + dot_radius,
-                dot_radius * 2,
-                dot_radius * 2,
+                19 - core_r,
+                29 - core_r,
+                19 + core_r,
+                29 + core_r,
+                core_r * 2,
+                core_r * 2,
             );
-
-            let _ = SelectObject(mem_dc, old_brush2);
-            let _ = SelectObject(mem_dc, old_pen2);
-            let _ = DeleteObject(dot_brush);
+            let _ = SelectObject(mem_dc, old_b2);
+            let _ = DeleteObject(core_brush);
+            let _ = SelectObject(mem_dc, old_pen_prev);
             let _ = DeleteObject(null_pen);
 
-            // Status Text
+            // Status Text (Segoe UI Bold 15px)
             let font = CreateFontW(
-                16, 0, 0, 0,
+                15, 0, 0, 0,
                 FW_BOLD.0 as i32,
                 0, 0, 0, 0, 0, 0, 0, 0,
                 windows::core::w!("Segoe UI"),
             );
             let old_font = SelectObject(mem_dc, font);
-            let _ = SetTextColor(mem_dc, COLORREF(0x00F8FAFC));
+            let _ = SetTextColor(mem_dc, COLORREF(0x00FFFFFF));
 
             let wide_label: Vec<u16> = label_text.encode_utf16().collect();
-            let _ = TextOutW(mem_dc, 32, 11, &wide_label);
+            let _ = TextOutW(mem_dc, 34, 11, &wide_label);
 
             let _ = SelectObject(mem_dc, old_font);
             let _ = DeleteObject(font);
 
-            // Provider Badge
+            // Active Provider Badge
             let badge_str = HUD_BADGE.lock().unwrap().clone();
             if !badge_str.is_empty() {
                 let badge_font = CreateFontW(
@@ -856,35 +885,43 @@ unsafe extern "system" fn hud_wnd_proc(
                     windows::core::w!("Segoe UI"),
                 );
                 let old_font2 = SelectObject(mem_dc, badge_font);
-                let _ = SetTextColor(mem_dc, COLORREF(0x00E4A50E)); // Cyan
-                let wide_badge: Vec<u16> = badge_str.encode_utf16().collect();
-                let _ = TextOutW(mem_dc, 32, 33, &wide_badge);
+                let _ = SetTextColor(mem_dc, COLORREF(0x00F8C006)); // Electric Cyan
+                let wide_badge: Vec<u16> = format!("⚡ {}", badge_str).encode_utf16().collect();
+                let _ = TextOutW(mem_dc, 34, 33, &wide_badge);
                 let _ = SelectObject(mem_dc, old_font2);
                 let _ = DeleteObject(badge_font);
             }
 
-            // 3. Right Animated Waveform Bars
+            // 3. Right Animated Waveform (9 balanced spectrum bars)
             if state == 1 || state == 2 {
-                let bar_count = 7;
-                let start_x = 160;
-                let bar_w = 5;
-                let gap = 5;
-                let center_y = 28;
+                let bar_count = 9;
+                let start_x = 164;
+                let bar_w = 4;
+                let gap = 6;
+                let center_y = 29;
 
-                let bar_brush = CreateSolidBrush(COLORREF(0x00E4A50E)); // Cyan
+                let bar_color = if state == 1 {
+                    COLORREF(0x00F8C006) // Electric Cyan
+                } else {
+                    COLORREF(0x00F755A8) // Transcribing Violet
+                };
+
+                let bar_brush = CreateSolidBrush(bar_color);
                 let null_pen2 = CreatePen(PS_NULL, 0, COLORREF(0));
                 let old_b3 = SelectObject(mem_dc, bar_brush);
                 let old_p3 = SelectObject(mem_dc, null_pen2);
 
                 for i in 0..bar_count {
                     let bx = start_x + (i * (bar_w + gap));
-                    let phase = (i as f32 * 0.45) + (tick as f32 * 0.3);
+                    let phase = (i as f32 * 0.40) + (tick as f32 * 0.35);
+                    let bell = 1.0 - ((i as f32 - 4.0).abs() / 4.5) * 0.35;
+
                     let wave = if state == 1 {
                         let sin_val = phase.sin() * 0.5 + 0.5;
-                        let height_boost = (amp * 45.0).clamp(2.0, 18.0);
-                        (sin_val * height_boost).max(2.0)
+                        let height_boost = (amp * 48.0).clamp(2.0, 20.0);
+                        (sin_val * height_boost * bell).max(2.5)
                     } else {
-                        (phase.sin() * 0.5 + 0.5) * 8.0 + 2.0
+                        (phase.sin() * 0.5 + 0.5) * 8.0 * bell + 2.0
                     };
 
                     let half_h = wave as i32;
@@ -894,8 +931,8 @@ unsafe extern "system" fn hud_wnd_proc(
                         center_y - half_h,
                         bx + bar_w,
                         center_y + half_h + 1,
-                        3,
-                        3,
+                        2,
+                        2,
                     );
                 }
 
