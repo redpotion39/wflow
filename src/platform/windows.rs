@@ -1,0 +1,920 @@
+use anyhow::{Context, Result};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::mpsc;
+use tracing::{error, info, warn};
+
+use windows::core::Interface;
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
+    CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, InvalidateRect, RoundRect, SelectObject,
+    SetBkMode, SetTextColor, TextOutW, FW_BOLD, FW_NORMAL, PAINTSTRUCT, PS_NULL, PS_SOLID,
+    SRCCOPY, TRANSPARENT,
+};
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+use windows::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, IUIAutomationValuePattern, UIA_ValuePatternId};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+    VK_CONTROL, VK_V,
+};
+use windows::Win32::UI::Shell::{
+    Shell_NotifyIconW, NOTIFYICONDATAW, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIF_ICON, NIF_MESSAGE, NIF_TIP,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    AppendMenuW, CallNextHookEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+    DispatchMessageW, EnumWindows, FindWindowW, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
+    GetMessageW, GetSystemMetrics, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, KillTimer,
+    LoadIconW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowPos, SetWindowsHookExW,
+    ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, HWND_TOP, IDI_APPLICATION,
+    KBDLLHOOKSTRUCT, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL,
+    WINDOW_EX_STYLE, WM_APP, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
+    WM_PAINT, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
+};
+
+use crate::ui::DictationStatus;
+
+#[derive(Clone, Debug, Default)]
+pub struct ActiveAppContext {
+    pub process_name: String,
+    pub window_title: String,
+    pub before_text: Option<String>,
+    pub after_text: Option<String>,
+    pub selected_text: Option<String>,
+    pub full_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyEvent {
+    Pressed,
+    Released,
+    #[allow(dead_code)]
+    ToggleWindow,
+    QuitApp,
+    KeyRecorded(u8, u16), // mode (1=Dictate, 2=ToggleWindow), vk_code
+}
+
+// Global hook callback state
+static HOOK_TX: std::sync::Mutex<Option<mpsc::UnboundedSender<HotkeyEvent>>> = std::sync::Mutex::new(None);
+static HOTKEY_DOWN: AtomicBool = AtomicBool::new(false);
+static TOGGLE_DOWN: AtomicBool = AtomicBool::new(false);
+static HOTKEY_VK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x77); // Default F8
+static TOGGLE_WINDOW_VK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x78); // Default F9
+static RECORDING_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0); // 0=None, 1=Dictate, 2=ToggleWindow
+static TRAY_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static HUD_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static HUD_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0); // 0=Hidden, 1=Listening, 2=Transcribing, 3=Done
+static HUD_AMPLITUDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static HUD_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static HUD_BADGE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+const WM_TRAY_CALLBACK: u32 = WM_APP + 101;
+
+pub fn vk_to_string(vk: u16) -> String {
+    match vk {
+        0x70 => "F1".to_string(),
+        0x71 => "F2".to_string(),
+        0x72 => "F3".to_string(),
+        0x73 => "F4".to_string(),
+        0x74 => "F5".to_string(),
+        0x75 => "F6".to_string(),
+        0x76 => "F7".to_string(),
+        0x77 => "F8".to_string(),
+        0x78 => "F9".to_string(),
+        0x79 => "F10".to_string(),
+        0x7A => "F11".to_string(),
+        0x7B => "F12".to_string(),
+        0xA3 => "Right Control".to_string(),
+        0xA2 => "Left Control".to_string(),
+        0x11 => "Control".to_string(),
+        0xA5 => "Right Alt".to_string(),
+        0xA4 => "Left Alt".to_string(),
+        0x12 => "Alt".to_string(),
+        0xA1 => "Right Shift".to_string(),
+        0xA0 => "Left Shift".to_string(),
+        0x10 => "Shift".to_string(),
+        0x14 => "Caps Lock".to_string(),
+        0x20 => "Space".to_string(),
+        0x09 => "Tab".to_string(),
+        0x0D => "Enter".to_string(),
+        0x1B => "Escape".to_string(),
+        0x2D => "Insert".to_string(),
+        0x2E => "Delete".to_string(),
+        0x24 => "Home".to_string(),
+        0x23 => "End".to_string(),
+        0x21 => "Page Up".to_string(),
+        0x22 => "Page Down".to_string(),
+        0x2C => "Print Screen".to_string(),
+        0x91 => "Scroll Lock".to_string(),
+        0x13 => "Pause / Break".to_string(),
+        0xC0 => "Tilde (~)".to_string(),
+        0x60..=0x69 => format!("NumPad {}", vk - 0x60),
+        0x6A => "NumPad *".to_string(),
+        0x6B => "NumPad +".to_string(),
+        0x6D => "NumPad -".to_string(),
+        0x6E => "NumPad .".to_string(),
+        0x6F => "NumPad /".to_string(),
+        0x30..=0x39 => format!("{}", (vk as u8) as char),
+        0x41..=0x5A => format!("{}", (vk as u8) as char),
+        _ => {
+            unsafe {
+                use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyNameTextW, MapVirtualKeyW, MAPVK_VK_TO_VSC};
+                let sc = MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC);
+                if sc > 0 {
+                    let lparam = (sc << 16) as i32;
+                    let mut buf = [0u16; 64];
+                    let len = GetKeyNameTextW(lparam, &mut buf);
+                    if len > 0 {
+                        let name = String::from_utf16_lossy(&buf[..len as usize]);
+                        if !name.trim().is_empty() {
+                            return name;
+                        }
+                    }
+                }
+            }
+            format!("Key (0x{:02X})", vk)
+        }
+    }
+}
+
+pub fn matches_vk(event_vk: u16, target_vk: u16) -> bool {
+    if event_vk == target_vk {
+        return true;
+    }
+    if target_vk == 0x11 && (event_vk == 0xA2 || event_vk == 0xA3) {
+        return true;
+    }
+    if target_vk == 0x10 && (event_vk == 0xA0 || event_vk == 0xA1) {
+        return true;
+    }
+    if target_vk == 0x12 && (event_vk == 0xA4 || event_vk == 0xA5) {
+        return true;
+    }
+    false
+}
+
+pub struct PlatformManager;
+
+impl PlatformManager {
+    /// Captures the currently active window and focused text box details using UI Automation
+    pub fn get_active_app_context() -> ActiveAppContext {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+
+        let mut ctx = ActiveAppContext::default();
+
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.0 == 0 as _ {
+                return ctx;
+            }
+
+            // Window title
+            let mut title_buf = [0u16; 512];
+            let len = GetWindowTextW(hwnd, &mut title_buf);
+            if len > 0 {
+                ctx.window_title = String::from_utf16_lossy(&title_buf[..len as usize]);
+            }
+
+            // Process name
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid > 0 {
+                if let Ok(handle) = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) {
+                    let mut proc_buf = [0u16; 1024];
+                    let proc_len = K32GetModuleFileNameExW(handle, None, &mut proc_buf);
+                    if proc_len > 0 {
+                        let full_path = String::from_utf16_lossy(&proc_buf[..proc_len as usize]);
+                        ctx.process_name = full_path
+                            .rsplit(['\\', '/'])
+                            .next()
+                            .unwrap_or(&full_path)
+                            .to_string();
+                    }
+                    let _ = windows::Win32::Foundation::CloseHandle(handle);
+                }
+            }
+
+            // UI Automation for focused textbox
+            if let Ok(automation) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                if let Ok(focused) = automation.GetFocusedElement() {
+                    if let Ok(pattern_obj) = focused.GetCurrentPattern(UIA_ValuePatternId) {
+                        if let Ok(value_pattern) = pattern_obj.cast::<IUIAutomationValuePattern>() {
+                            if let Ok(val) = value_pattern.CurrentValue() {
+                                let text = val.to_string();
+                                if !text.is_empty() {
+                                    ctx.full_text = Some(text.clone());
+                                    ctx.before_text = Some(text);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            CoUninitialize();
+        }
+
+        ctx
+    }
+
+    /// Simulates pasting the given text into the currently focused window
+    pub fn paste_text(text: &str) -> Result<()> {
+        info!("Inserting text: '{}'", text);
+
+        // 1. Copy text to clipboard via arboard
+        let mut clipboard = arboard::Clipboard::new().context("Failed to access system clipboard")?;
+        let prev_text = clipboard.get_text().ok();
+
+        clipboard.set_text(text).context("Failed to write text to clipboard")?;
+
+        // 2. Small delay to ensure clipboard is populated
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // 3. Send Ctrl + V
+        unsafe {
+            let inputs = [
+                // Ctrl down
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VK_CONTROL,
+                            wScan: 0,
+                            dwFlags: KEYBD_EVENT_FLAGS(0),
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                },
+                // V down
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VK_V,
+                            wScan: 0,
+                            dwFlags: KEYBD_EVENT_FLAGS(0),
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                },
+                // V up
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VK_V,
+                            wScan: 0,
+                            dwFlags: KEYEVENTF_KEYUP,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                },
+                // Ctrl up
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VK_CONTROL,
+                            wScan: 0,
+                            dwFlags: KEYEVENTF_KEYUP,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                },
+            ];
+
+            let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+            if sent != inputs.len() as u32 {
+                warn!("SendInput only sent {}/{} events", sent, inputs.len());
+            }
+        }
+
+        // 4. Restore previous clipboard content after short delay
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if let Some(prev) = prev_text {
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    let _ = cb.set_text(prev);
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Spawns a background low-level keyboard hook monitoring push-to-talk hotkey and manages System Tray icon
+    pub fn start_hotkey_listener(
+        tx: mpsc::UnboundedSender<HotkeyEvent>,
+        initial_hotkey_vk: u16,
+        initial_toggle_vk: u16,
+    ) -> Result<std::thread::JoinHandle<()>> {
+        HOTKEY_VK.store(initial_hotkey_vk as u32, Ordering::SeqCst);
+        TOGGLE_WINDOW_VK.store(initial_toggle_vk as u32, Ordering::SeqCst);
+
+        let handle = std::thread::spawn(move || unsafe {
+            if let Ok(mut lock) = HOOK_TX.lock() {
+                *lock = Some(tx);
+            }
+
+            let class_name = windows::core::w!("WisprFlowTrayMsgClass");
+            let wndclass = WNDCLASSW {
+                lpfnWndProc: Some(tray_wnd_proc),
+                lpszClassName: windows::core::PCWSTR(class_name.as_ptr()),
+                ..Default::default()
+            };
+            let _ = RegisterClassW(&wndclass);
+
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::PCWSTR(class_name.as_ptr()),
+                windows::core::w!("WisprFlowTrayMsgWindow"),
+                WS_OVERLAPPED,
+                0, 0, 0, 0,
+                None, None, None, None,
+            ).unwrap_or_default();
+
+            TRAY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+
+            // Register and create floating HUD overlay window
+            let hud_class_name = windows::core::w!("WisprFlowFloatingHudClass");
+            let hud_wndclass = WNDCLASSW {
+                lpfnWndProc: Some(hud_wnd_proc),
+                lpszClassName: windows::core::PCWSTR(hud_class_name.as_ptr()),
+                ..Default::default()
+            };
+            let _ = RegisterClassW(&hud_wndclass);
+
+            let screen_w = GetSystemMetrics(SM_CXSCREEN);
+            let screen_h = GetSystemMetrics(SM_CYSCREEN);
+            let hud_w = 265;
+            let hud_h = 56;
+            let hud_x = (screen_w - hud_w) / 2;
+            let hud_y = screen_h - hud_h - 75;
+
+            let hud_hwnd = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                windows::core::PCWSTR(hud_class_name.as_ptr()),
+                windows::core::w!("WisprFlowFloatingHudWindow"),
+                WS_POPUP,
+                hud_x, hud_y, hud_w, hud_h,
+                None, None, None, None,
+            ).unwrap_or_default();
+
+            HUD_HWND.store(hud_hwnd.0 as isize, Ordering::SeqCst);
+
+            let mut nid = NOTIFYICONDATAW::default();
+            nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+            nid.hWnd = hwnd;
+            nid.uID = 1001;
+            nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+            nid.uCallbackMessage = WM_TRAY_CALLBACK;
+            nid.hIcon = LoadIconW(None, IDI_APPLICATION).unwrap_or_default();
+
+            let tip = format!(
+                "Wispr Flow (Rust)\n{}: Dictate | {}: Toggle Window\0",
+                vk_to_string(initial_hotkey_vk),
+                vk_to_string(initial_toggle_vk)
+            );
+            for (i, ch) in tip.encode_utf16().enumerate() {
+                if i < nid.szTip.len() - 1 {
+                    nid.szTip[i] = ch;
+                }
+            }
+            let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+            info!(
+                "System Tray icon registered in Windows Taskbar ({}: Dictate, {}: Toggle Window).",
+                vk_to_string(initial_hotkey_vk),
+                vk_to_string(initial_toggle_vk)
+            );
+
+            let hook = SetWindowsHookExW(
+                WH_KEYBOARD_LL,
+                Some(low_level_keyboard_proc),
+                None,
+                0,
+            );
+
+            if let Ok(h) = hook {
+                info!(
+                    "Global keyboard hook registered (Dictate: {}, Toggle: {}).",
+                    vk_to_string(initial_hotkey_vk),
+                    vk_to_string(initial_toggle_vk)
+                );
+
+                let mut msg = MSG::default();
+                while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+
+                let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+                let _ = UnhookWindowsHookEx(h);
+            } else {
+                error!("Failed to register low-level keyboard hook");
+                let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+            }
+
+            HUD_HWND.store(0, Ordering::SeqCst);
+            TRAY_HWND.store(0, Ordering::SeqCst);
+        });
+
+        Ok(handle)
+    }
+
+    #[allow(dead_code)]
+    pub fn get_hotkey_vk() -> u16 {
+        HOTKEY_VK.load(Ordering::SeqCst) as u16
+    }
+
+    pub fn get_toggle_window_vk() -> u16 {
+        TOGGLE_WINDOW_VK.load(Ordering::SeqCst) as u16
+    }
+
+    pub fn update_hotkeys(hotkey_vk: u16, toggle_vk: u16) {
+        HOTKEY_VK.store(hotkey_vk as u32, Ordering::SeqCst);
+        TOGGLE_WINDOW_VK.store(toggle_vk as u32, Ordering::SeqCst);
+        info!(
+            "Updated active hotkeys: Dictate = {} (0x{:02X}), Toggle = {} (0x{:02X})",
+            vk_to_string(hotkey_vk),
+            hotkey_vk,
+            vk_to_string(toggle_vk),
+            toggle_vk,
+        );
+        Self::update_tray_tooltip(hotkey_vk, toggle_vk);
+    }
+
+    pub fn start_recording_hotkey(mode: u8) {
+        RECORDING_MODE.store(mode, Ordering::SeqCst);
+        info!("Hotkey recording mode set to: {}", mode);
+    }
+
+    pub fn stop_recording_hotkey() {
+        RECORDING_MODE.store(0, Ordering::SeqCst);
+        info!("Hotkey recording mode stopped.");
+    }
+
+    pub fn show_floating_hud(provider_badge: &str) {
+        if let Ok(mut lock) = HUD_BADGE.lock() {
+            *lock = provider_badge.to_string();
+        }
+        HUD_STATE.store(1, Ordering::SeqCst); // 1 = Listening
+        let val = HUD_HWND.load(Ordering::SeqCst);
+        if val != 0 {
+            let hwnd = HWND(val as *mut core::ffi::c_void);
+            unsafe {
+                let _ = SetTimer(hwnd, 1, 30, None);
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                let _ = InvalidateRect(hwnd, None, false);
+            }
+        }
+    }
+
+    pub fn set_hud_status(status: DictationStatus) {
+        let st_num = match status {
+            DictationStatus::Listening => 1,
+            DictationStatus::Transcribing => 2,
+            DictationStatus::Done => 3,
+            _ => 0,
+        };
+        HUD_STATE.store(st_num, Ordering::SeqCst);
+        let val = HUD_HWND.load(Ordering::SeqCst);
+        if val != 0 {
+            let hwnd = HWND(val as *mut core::ffi::c_void);
+            unsafe {
+                let _ = InvalidateRect(hwnd, None, false);
+            }
+        }
+    }
+
+    pub fn update_hud_amplitude(amp: f32) {
+        HUD_AMPLITUDE.store(amp.to_bits(), Ordering::SeqCst);
+    }
+
+    pub fn hide_floating_hud() {
+        HUD_STATE.store(0, Ordering::SeqCst);
+        let val = HUD_HWND.load(Ordering::SeqCst);
+        if val != 0 {
+            let hwnd = HWND(val as *mut core::ffi::c_void);
+            unsafe {
+                let _ = KillTimer(hwnd, 1);
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+    }
+
+    pub fn update_tray_tooltip(hotkey_vk: u16, toggle_vk: u16) {
+        unsafe {
+            let val = TRAY_HWND.load(Ordering::SeqCst);
+            if val != 0 {
+                let hwnd = HWND(val as *mut core::ffi::c_void);
+                let mut nid = NOTIFYICONDATAW::default();
+                nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+                nid.hWnd = hwnd;
+                nid.uID = 1001;
+                nid.uFlags = NIF_TIP;
+
+                let tip = format!(
+                    "Wispr Flow (Rust)\n{}: Dictate | {}: Toggle Window\0",
+                    vk_to_string(hotkey_vk),
+                    vk_to_string(toggle_vk),
+                );
+                for (i, ch) in tip.encode_utf16().enumerate() {
+                    if i < nid.szTip.len() - 1 {
+                        nid.szTip[i] = ch;
+                    }
+                }
+                let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+            }
+        }
+    }
+
+    /// Toggles visibility of the main GUI window using direct Win32 APIs
+    pub fn toggle_main_window() {
+        unsafe {
+            if let Some(hwnd) = Self::find_main_window_hwnd() {
+                let is_vis = IsWindowVisible(hwnd).as_bool();
+                if is_vis {
+                    info!("Hiding GUI window to system tray (HWND {:?})", hwnd);
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                } else {
+                    info!("Restoring GUI window from system tray (HWND {:?})", hwnd);
+                    let _ = ShowWindow(hwnd, SW_SHOW);
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        HWND_TOP,
+                        0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                    );
+                    let _ = SetForegroundWindow(hwnd);
+                }
+            } else {
+                warn!("Could not find GUI window to toggle");
+            }
+        }
+    }
+
+    /// Shows and activates the main GUI window
+    pub fn show_main_window() {
+        unsafe {
+            if let Some(hwnd) = Self::find_main_window_hwnd() {
+                info!("Showing GUI window from system tray (HWND {:?})", hwnd);
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_TOP,
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                );
+                let _ = SetForegroundWindow(hwnd);
+            }
+        }
+    }
+
+    /// Hides the main GUI window to system tray
+    pub fn hide_main_window() {
+        unsafe {
+            if let Some(hwnd) = Self::find_main_window_hwnd() {
+                info!("Hiding GUI window to system tray (HWND {:?})", hwnd);
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+    }
+
+    /// Finds the HWND of the main GUI window
+    pub fn find_main_window_hwnd() -> Option<HWND> {
+        unsafe {
+            // 1. Try FindWindowW by title
+            let title = windows::core::w!("Wispr Flow (Rust Edition) - AI Voice Studio");
+            if let Ok(h) = FindWindowW(None, title) {
+                if !h.is_invalid() && h.0 != std::ptr::null_mut() {
+                    return Some(h);
+                }
+            }
+
+            // 2. Enumerate all windows of this process
+            let current_pid = windows::Win32::System::Threading::GetCurrentProcessId();
+            struct EnumCtx {
+                target_pid: u32,
+                found: Option<HWND>,
+            }
+            let mut ctx = EnumCtx {
+                target_pid: current_pid,
+                found: None,
+            };
+
+            unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> windows::Win32::Foundation::BOOL {
+                let p = lparam.0 as *mut EnumCtx;
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(hwnd, Some(&mut pid));
+                if pid == (*p).target_pid {
+                    let mut class_name = [0u16; 256];
+                    let len = GetClassNameW(hwnd, &mut class_name);
+                    let class_str = String::from_utf16_lossy(&class_name[..len as usize]);
+                    if !class_str.contains("WisprFlowTrayMsg") {
+                        (*p).found = Some(hwnd);
+                        return windows::Win32::Foundation::BOOL(0);
+                    }
+                }
+                windows::Win32::Foundation::BOOL(1)
+            }
+
+            let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut EnumCtx as isize));
+            ctx.found
+        }
+    }
+}
+
+unsafe extern "system" fn tray_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    w_param: WPARAM,
+    l_param: LPARAM,
+) -> LRESULT {
+    if msg == WM_TRAY_CALLBACK {
+        let event = (l_param.0 as u32) & 0xFFFF;
+        info!("System tray mouse event: 0x{:04X}", event);
+        if event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
+            PlatformManager::toggle_main_window();
+        } else if event == WM_RBUTTONUP {
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            if let Ok(hmenu) = CreatePopupMenu() {
+                let toggle_name = vk_to_string(PlatformManager::get_toggle_window_vk());
+                let open_str = format!("Open Wispr Flow ({})\0", toggle_name);
+                let open_wide: Vec<u16> = open_str.encode_utf16().collect();
+
+                let _ = AppendMenuW(hmenu, MF_STRING, 1, windows::core::PCWSTR(open_wide.as_ptr()));
+                let _ = AppendMenuW(hmenu, MF_STRING, 2, windows::core::w!("Hide to Tray"));
+                let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
+                let _ = AppendMenuW(hmenu, MF_STRING, 3, windows::core::w!("Exit Application"));
+
+                let _ = SetForegroundWindow(hwnd);
+                let cmd = TrackPopupMenu(
+                    hmenu,
+                    TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                    pt.x,
+                    pt.y,
+                    0,
+                    hwnd,
+                    None,
+                );
+                let _ = DestroyMenu(hmenu);
+
+                if cmd.0 == 1 {
+                    PlatformManager::show_main_window();
+                } else if cmd.0 == 2 {
+                    PlatformManager::hide_main_window();
+                } else if cmd.0 == 3 {
+                    if let Ok(guard) = HOOK_TX.lock() {
+                        if let Some(tx) = guard.as_ref() {
+                            let _ = tx.send(HotkeyEvent::QuitApp);
+                        }
+                    }
+                    let _ = PostQuitMessage(0);
+                }
+            }
+        }
+        return LRESULT(0);
+    }
+    DefWindowProcW(hwnd, msg, w_param, l_param)
+}
+
+unsafe extern "system" fn low_level_keyboard_proc(
+    n_code: i32,
+    w_param: WPARAM,
+    l_param: LPARAM,
+) -> LRESULT {
+    if n_code >= 0 {
+        let kbd_struct = *(l_param.0 as *const KBDLLHOOKSTRUCT);
+        let vk_code = kbd_struct.vkCode as u16;
+        let msg = w_param.0 as u32;
+        let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+        let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
+
+        // 1. If currently in hotkey recording mode, capture the key
+        let rec_mode = RECORDING_MODE.load(Ordering::SeqCst);
+        if rec_mode != 0 && is_down {
+            RECORDING_MODE.store(0, Ordering::SeqCst);
+            let captured_vk = if vk_code == 0x1B /* Escape */ { 0 } else { vk_code };
+            if let Ok(guard) = HOOK_TX.lock() {
+                if let Some(tx) = guard.as_ref() {
+                    let _ = tx.send(HotkeyEvent::KeyRecorded(rec_mode, captured_vk));
+                }
+            }
+            return LRESULT(1); // Suppress recorded key press
+        }
+
+        // 2. Normal hotkey monitoring
+        let hotkey_vk = HOTKEY_VK.load(Ordering::SeqCst) as u16;
+        let toggle_vk = TOGGLE_WINDOW_VK.load(Ordering::SeqCst) as u16;
+
+        if matches_vk(vk_code, hotkey_vk) {
+            if is_down && !HOTKEY_DOWN.load(Ordering::SeqCst) {
+                HOTKEY_DOWN.store(true, Ordering::SeqCst);
+                if let Ok(guard) = HOOK_TX.lock() {
+                    if let Some(tx) = guard.as_ref() {
+                        let _ = tx.send(HotkeyEvent::Pressed);
+                    }
+                }
+            } else if is_up && HOTKEY_DOWN.load(Ordering::SeqCst) {
+                HOTKEY_DOWN.store(false, Ordering::SeqCst);
+                if let Ok(guard) = HOOK_TX.lock() {
+                    if let Some(tx) = guard.as_ref() {
+                        let _ = tx.send(HotkeyEvent::Released);
+                    }
+                }
+            }
+        } else if matches_vk(vk_code, toggle_vk) {
+            if is_down && !TOGGLE_DOWN.load(Ordering::SeqCst) {
+                TOGGLE_DOWN.store(true, Ordering::SeqCst);
+                PlatformManager::toggle_main_window();
+            } else if is_up {
+                TOGGLE_DOWN.store(false, Ordering::SeqCst);
+            }
+        }
+    }
+
+    CallNextHookEx(None, n_code, w_param, l_param)
+}
+
+unsafe extern "system" fn hud_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    w_param: WPARAM,
+    l_param: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_ERASEBKGND => LRESULT(1), // Prevent flicker
+        WM_TIMER => {
+            HUD_TICK.fetch_add(1, Ordering::SeqCst);
+            let _ = InvalidateRect(hwnd, None, false);
+            LRESULT(0)
+        }
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+
+            let mut rect = RECT::default();
+            let _ = GetClientRect(hwnd, &mut rect);
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+
+            let mem_dc = CreateCompatibleDC(hdc);
+            let mem_bmp = CreateCompatibleBitmap(hdc, width, height);
+            let old_bmp = SelectObject(mem_dc, mem_bmp);
+
+            // 1. Draw rounded dark card pill (RGB: 16, 20, 32 -> 0x00201410)
+            let card_brush = CreateSolidBrush(COLORREF(0x00201410));
+            let card_pen = CreatePen(PS_SOLID, 1, COLORREF(0x00523C32)); // Border RGB: 50, 60, 82
+            let old_brush = SelectObject(mem_dc, card_brush);
+            let old_pen = SelectObject(mem_dc, card_pen);
+
+            let _ = RoundRect(mem_dc, 1, 1, width - 1, height - 1, 26, 26);
+
+            let _ = SelectObject(mem_dc, old_brush);
+            let _ = SelectObject(mem_dc, old_pen);
+            let _ = DeleteObject(card_brush);
+            let _ = DeleteObject(card_pen);
+
+            let state = HUD_STATE.load(Ordering::SeqCst);
+            let tick = HUD_TICK.load(Ordering::SeqCst);
+            let amp = f32::from_bits(HUD_AMPLITUDE.load(Ordering::SeqCst));
+
+            let _ = SetBkMode(mem_dc, TRANSPARENT);
+
+            // 2. Left indicator dot & label
+            let (dot_color, label_text) = match state {
+                1 => {
+                    let pulse = (tick as f32 * 0.2).sin().abs();
+                    let red = (200.0 + pulse * 55.0) as u32;
+                    (COLORREF(red), "Listening...")
+                }
+                2 => (COLORREF(0x00F755A8), "Transcribing..."),
+                3 => (COLORREF(0x0045DC22), "Inserted!"),
+                _ => (COLORREF(0x00888888), "Ready"),
+            };
+
+            // Dot circle
+            let dot_brush = CreateSolidBrush(dot_color);
+            let null_pen = CreatePen(PS_NULL, 0, COLORREF(0));
+            let old_brush2 = SelectObject(mem_dc, dot_brush);
+            let old_pen2 = SelectObject(mem_dc, null_pen);
+
+            let dot_radius = if state == 1 {
+                5 + ((tick as f32 * 0.25).sin().abs() * 2.0) as i32
+            } else {
+                5
+            };
+            let _ = RoundRect(
+                mem_dc,
+                18 - dot_radius,
+                28 - dot_radius,
+                18 + dot_radius,
+                28 + dot_radius,
+                dot_radius * 2,
+                dot_radius * 2,
+            );
+
+            let _ = SelectObject(mem_dc, old_brush2);
+            let _ = SelectObject(mem_dc, old_pen2);
+            let _ = DeleteObject(dot_brush);
+            let _ = DeleteObject(null_pen);
+
+            // Status Text
+            let font = CreateFontW(
+                16, 0, 0, 0,
+                FW_BOLD.0 as i32,
+                0, 0, 0, 0, 0, 0, 0, 0,
+                windows::core::w!("Segoe UI"),
+            );
+            let old_font = SelectObject(mem_dc, font);
+            let _ = SetTextColor(mem_dc, COLORREF(0x00F8FAFC));
+
+            let wide_label: Vec<u16> = label_text.encode_utf16().collect();
+            let _ = TextOutW(mem_dc, 32, 11, &wide_label);
+
+            let _ = SelectObject(mem_dc, old_font);
+            let _ = DeleteObject(font);
+
+            // Provider Badge
+            let badge_str = HUD_BADGE.lock().unwrap().clone();
+            if !badge_str.is_empty() {
+                let badge_font = CreateFontW(
+                    11, 0, 0, 0,
+                    FW_NORMAL.0 as i32,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                    windows::core::w!("Segoe UI"),
+                );
+                let old_font2 = SelectObject(mem_dc, badge_font);
+                let _ = SetTextColor(mem_dc, COLORREF(0x00E4A50E)); // Cyan
+                let wide_badge: Vec<u16> = badge_str.encode_utf16().collect();
+                let _ = TextOutW(mem_dc, 32, 33, &wide_badge);
+                let _ = SelectObject(mem_dc, old_font2);
+                let _ = DeleteObject(badge_font);
+            }
+
+            // 3. Right Animated Waveform Bars
+            if state == 1 || state == 2 {
+                let bar_count = 7;
+                let start_x = 160;
+                let bar_w = 5;
+                let gap = 5;
+                let center_y = 28;
+
+                let bar_brush = CreateSolidBrush(COLORREF(0x00E4A50E)); // Cyan
+                let null_pen2 = CreatePen(PS_NULL, 0, COLORREF(0));
+                let old_b3 = SelectObject(mem_dc, bar_brush);
+                let old_p3 = SelectObject(mem_dc, null_pen2);
+
+                for i in 0..bar_count {
+                    let bx = start_x + (i * (bar_w + gap));
+                    let phase = (i as f32 * 0.45) + (tick as f32 * 0.3);
+                    let wave = if state == 1 {
+                        let sin_val = phase.sin() * 0.5 + 0.5;
+                        let height_boost = (amp * 45.0).clamp(2.0, 18.0);
+                        (sin_val * height_boost).max(2.0)
+                    } else {
+                        (phase.sin() * 0.5 + 0.5) * 8.0 + 2.0
+                    };
+
+                    let half_h = wave as i32;
+                    let _ = RoundRect(
+                        mem_dc,
+                        bx,
+                        center_y - half_h,
+                        bx + bar_w,
+                        center_y + half_h + 1,
+                        3,
+                        3,
+                    );
+                }
+
+                let _ = SelectObject(mem_dc, old_b3);
+                let _ = SelectObject(mem_dc, old_p3);
+                let _ = DeleteObject(bar_brush);
+                let _ = DeleteObject(null_pen2);
+            }
+
+            // Copy back buffer to screen
+            let _ = BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
+
+            let _ = SelectObject(mem_dc, old_bmp);
+            let _ = DeleteObject(mem_bmp);
+            let _ = DeleteDC(mem_dc);
+
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, w_param, l_param),
+    }
+}
