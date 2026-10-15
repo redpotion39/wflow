@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod audio;
 mod config;
 mod db;
@@ -34,7 +36,7 @@ fn main() -> Result<()> {
         )
         .init();
 
-    info!("Starting Wispr Flow (Rust Native Edition)...");
+    info!("Starting Wflow (Rust Native Edition)...");
 
     // 2. Load configuration & database
     let config = AppConfig::load_or_default(None);
@@ -86,7 +88,7 @@ fn main() -> Result<()> {
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_inner_size([920.0, 640.0])
         .with_min_inner_size([760.0, 500.0])
-        .with_title("Wispr Flow (Rust Edition) - AI Voice Studio")
+        .with_title("Wflow - AI Voice Studio")
         .with_active(true);
 
     if let Some(icon) = load_app_icon() {
@@ -100,7 +102,7 @@ fn main() -> Result<()> {
 
     info!("Launching Native GUI window...");
     eframe::run_native(
-        "Wispr Flow",
+        "Wflow",
         native_options,
         Box::new(move |_cc| Ok(Box::new(WisprFlowGui::new(app_state_gui, gui_tx)))),
     )

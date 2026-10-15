@@ -383,7 +383,7 @@ impl PlatformManager {
             nid.hIcon = Self::get_app_icon(1);
 
             let tip = format!(
-                "Wispr Flow (Rust)\n{}: Dictate | {}: Toggle Window\0",
+                "Wflow\n{}: Dictate | {}: Toggle Window\0",
                 vk_to_string(initial_hotkey_vk),
                 vk_to_string(initial_toggle_vk)
             );
@@ -664,7 +664,7 @@ impl PlatformManager {
                 nid.uFlags = NIF_TIP;
 
                 let tip = format!(
-                    "Wispr Flow (Rust)\n{}: Dictate | {}: Toggle Window\0",
+                    "Wflow\n{}: Dictate | {}: Toggle Window\0",
                     vk_to_string(hotkey_vk),
                     vk_to_string(toggle_vk),
                 );
@@ -736,7 +736,7 @@ impl PlatformManager {
     pub fn find_main_window_hwnd() -> Option<HWND> {
         unsafe {
             // 1. Try FindWindowW by title
-            let title = windows::core::w!("Wispr Flow (Rust Edition) - AI Voice Studio");
+            let title = windows::core::w!("Wflow - AI Voice Studio");
             if let Ok(h) = FindWindowW(None, title) {
                 if !h.is_invalid() && h.0 != std::ptr::null_mut() {
                     return Some(h);
@@ -762,7 +762,7 @@ impl PlatformManager {
                     let mut class_name = [0u16; 256];
                     let len = GetClassNameW(hwnd, &mut class_name);
                     let class_str = String::from_utf16_lossy(&class_name[..len as usize]);
-                    if !class_str.contains("WisprFlowTrayMsg") {
+                    if !class_str.contains("WisprFlowTrayMsg") && !class_str.contains("WflowTrayMsg") {
                         (*p).found = Some(hwnd);
                         return windows::Win32::Foundation::BOOL(0);
                     }
@@ -792,7 +792,7 @@ unsafe extern "system" fn tray_wnd_proc(
             let _ = GetCursorPos(&mut pt);
             if let Ok(hmenu) = CreatePopupMenu() {
                 let toggle_name = vk_to_string(PlatformManager::get_toggle_window_vk());
-                let open_str = format!("Open Wispr Flow ({})\0", toggle_name);
+                let open_str = format!("Open Wflow ({})\0", toggle_name);
                 let open_wide: Vec<u16> = open_str.encode_utf16().collect();
 
                 let _ = AppendMenuW(hmenu, MF_STRING, 1, windows::core::PCWSTR(open_wide.as_ptr()));

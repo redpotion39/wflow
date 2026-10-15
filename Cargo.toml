@@ -1,9 +1,13 @@
 [package]
-name = "wispr-flow-rust"
+name = "wflow"
 version = "0.1.0"
 edition = "2021"
-authors = ["Wispr Flow Rust Reimplementation"]
-description = "High-performance native Rust reimplementation of Wispr Flow AI dictation"
+authors = ["Wflow Team"]
+description = "High-performance native Rust AI voice dictation"
+
+[[bin]]
+name = "wflow"
+path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1.40", features = ["full"] }

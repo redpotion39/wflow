@@ -102,7 +102,7 @@ pub struct WisprFlowGui {
 }
 
 pub const POPULAR_HOTKEYS: &[(&str, u16)] = &[
-    ("F8 (Wispr Flow Default)", 0x77),
+    ("F8 (Wflow Default)", 0x77),
     ("Right Control", 0xA3),
     ("Left Control", 0xA2),
     ("Right Alt", 0xA5),
@@ -523,7 +523,7 @@ impl WisprFlowGui {
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new("WISPR FLOW")
+                                egui::RichText::new("WFLOW")
                                     .font(FontId::proportional(18.0))
                                     .strong()
                                     .color(Color32::WHITE),

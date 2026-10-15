@@ -35,9 +35,9 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "FileDescription", "Wispr Flow Rust Edition - AI Voice Studio"
+            VALUE "FileDescription", "Wflow - Native AI Voice Studio"
             VALUE "FileVersion", "0.1.0"
-            VALUE "ProductName", "Wispr Flow"
+            VALUE "ProductName", "Wflow"
             VALUE "ProductVersion", "0.1.0"
         END
     END

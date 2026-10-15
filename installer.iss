@@ -1,18 +1,18 @@
-#define MyAppName "Wispr Flow"
+#define MyAppName "Wflow"
 #define MyAppVersion "0.1.0"
-#define MyAppPublisher "Wispr Flow Rust Team"
-#define MyAppExeName "wispr-flow-rust.exe"
+#define MyAppPublisher "Wflow Team"
+#define MyAppExeName "wflow.exe"
 
 [Setup]
 AppId={{C78F5960-A6E5-47F1-9B54-68FE11E2616A}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={autopf}\Wispr Flow
+DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir=dist
-OutputBaseFilename=WisprFlow-Setup-{#MyAppVersion}
+OutputBaseFilename=Wflow-Setup-{#MyAppVersion}
 SetupIconFile=assets\app_icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -28,7 +28,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
-Name: "startupicon"; Description: "Launch Wispr Flow automatically when Windows starts"; GroupDescription: "System Integration:"; Flags: unchecked
+Name: "startupicon"; Description: "Launch Wflow automatically when Windows starts"; GroupDescription: "System Integration:"; Flags: unchecked
 
 [Files]
 Source: "target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
