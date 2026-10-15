@@ -1,5 +1,6 @@
 /target
 *.sqlite*
 *.json
+*.log
 !Cargo.lock
 
