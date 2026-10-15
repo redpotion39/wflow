@@ -12,6 +12,7 @@ use windows::Win32::Graphics::Gdi::{
     PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, IUIAutomationValuePattern, UIA_ValuePatternId};
@@ -27,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, EnumWindows, FindWindowW, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
     GetMessageW, GetSystemMetrics, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, KillTimer,
     LoadIconW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowPos, SetWindowsHookExW,
-    ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, HWND_TOP, IDI_APPLICATION,
+    ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, HICON, HWND_TOP, IDI_APPLICATION,
     KBDLLHOOKSTRUCT, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
     SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL,
     WINDOW_EX_STYLE, WM_APP, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
@@ -379,7 +380,7 @@ impl PlatformManager {
             nid.uID = 1001;
             nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
             nid.uCallbackMessage = WM_TRAY_CALLBACK;
-            nid.hIcon = LoadIconW(None, IDI_APPLICATION).unwrap_or_default();
+            nid.hIcon = Self::get_app_icon(1);
 
             let tip = format!(
                 "Wispr Flow (Rust)\n{}: Dictate | {}: Toggle Window\0",
@@ -480,7 +481,42 @@ impl PlatformManager {
         }
     }
 
+    /// Loads an icon embedded in the PE resource section (1: App Icon, 2: Recording Icon),
+    /// or falls back to IDI_APPLICATION if not found.
+    pub fn get_app_icon(resource_id: u16) -> HICON {
+        unsafe {
+            if let Ok(hmodule) = GetModuleHandleW(None) {
+                if let Ok(icon) = LoadIconW(hmodule, windows::core::PCWSTR(resource_id as usize as *const u16)) {
+                    if !icon.is_invalid() && icon.0 != std::ptr::null_mut() {
+                        return icon;
+                    }
+                }
+            }
+            LoadIconW(None, IDI_APPLICATION).unwrap_or_default()
+        }
+    }
+
+    /// Dynamically switches the Windows System Tray icon between idle and recording state
+    pub fn set_tray_recording_state(is_recording: bool) {
+        unsafe {
+            let val = TRAY_HWND.load(Ordering::SeqCst);
+            if val != 0 {
+                let hwnd = HWND(val as *mut core::ffi::c_void);
+                let mut nid = NOTIFYICONDATAW::default();
+                nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+                nid.hWnd = hwnd;
+                nid.uID = 1001;
+                nid.uFlags = NIF_ICON;
+                let icon_id = if is_recording { 2 } else { 1 };
+                nid.hIcon = Self::get_app_icon(icon_id);
+                let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+            }
+        }
+    }
+
     pub fn set_hud_status(status: DictationStatus) {
+        Self::set_tray_recording_state(status == DictationStatus::Listening);
+
         let st_num = match status {
             DictationStatus::Listening => 1,
             DictationStatus::Transcribing => 2,

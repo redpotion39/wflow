@@ -83,12 +83,18 @@ fn main() -> Result<()> {
     });
 
     // 7. Launch modern Native GUI on main OS thread
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([920.0, 640.0])
+        .with_min_inner_size([760.0, 500.0])
+        .with_title("Wispr Flow (Rust Edition) - AI Voice Studio")
+        .with_active(true);
+
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([920.0, 640.0])
-            .with_min_inner_size([760.0, 500.0])
-            .with_title("Wispr Flow (Rust Edition) - AI Voice Studio")
-            .with_active(true),
+        viewport,
         ..Default::default()
     };
 
@@ -99,6 +105,17 @@ fn main() -> Result<()> {
         Box::new(move |_cc| Ok(Box::new(WisprFlowGui::new(app_state_gui, gui_tx)))),
     )
     .map_err(|e| anyhow::anyhow!("GUI error: {}", e))
+}
+
+fn load_app_icon() -> Option<eframe::egui::IconData> {
+    let icon_bytes = include_bytes!("../assets/icon_256.png");
+    let img = image::load_from_memory(icon_bytes).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    Some(eframe::egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    })
 }
 
 async fn run_background_coordinator(
@@ -292,6 +309,8 @@ async fn start_dictation_session(
     if show_floating_hud {
         PlatformManager::show_floating_hud(stt_provider.short_badge());
         PlatformManager::set_hud_status(DictationStatus::Listening);
+    } else {
+        PlatformManager::set_tray_recording_state(true);
     }
 
     // Capture focused window & textbox context
