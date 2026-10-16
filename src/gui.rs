@@ -5,9 +5,9 @@ use std::time::Instant;
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use tokio::sync::mpsc;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, KeyCombo};
 use crate::db::{DictionaryEntry, HistoryRecord};
-use crate::platform::{vk_to_string, ActiveAppContext, PlatformManager};
+use crate::platform::{ActiveAppContext, PlatformManager};
 use crate::stt::SttProvider;
 use crate::ui::DictationStatus;
 
@@ -49,7 +49,7 @@ pub struct AppState {
     pub pending_toggle_window: Arc<AtomicBool>,
     pub pending_quit: Arc<AtomicBool>,
     pub egui_ctx: Arc<Mutex<Option<egui::Context>>>,
-    pub recorded_key: Arc<Mutex<Option<(u8, u16)>>>,
+    pub recorded_key: Arc<Mutex<Option<(u8, KeyCombo)>>>,
 }
 
 impl AppState {
@@ -89,8 +89,8 @@ pub struct WisprFlowGui {
     settings_endpoint: String,
     settings_token: String,
     settings_language: String,
-    settings_hotkey_vk: u16,
-    settings_toggle_vk: u16,
+    settings_hotkey: KeyCombo,
+    settings_toggle: KeyCombo,
     recording_mode: Option<u8>,
     settings_auto_paste: bool,
     settings_auto_start: bool,
@@ -119,29 +119,35 @@ pub struct WisprFlowGui {
     window_icon_applied: bool,
 }
 
-pub const POPULAR_HOTKEYS: &[(&str, u16)] = &[
-    ("F8 (Wflow Default)", 0x77),
-    ("Right Control", 0xA3),
-    ("Left Control", 0xA2),
-    ("Right Alt", 0xA5),
-    ("Left Alt", 0xA4),
-    ("Caps Lock", 0x14),
-    ("F1", 0x70),
-    ("F2", 0x71),
-    ("F3", 0x72),
-    ("F4", 0x73),
-    ("F5", 0x74),
-    ("F6", 0x75),
-    ("F7", 0x76),
-    ("F8", 0x77),
-    ("F9", 0x78),
-    ("F10", 0x79),
-    ("F11", 0x7A),
-    ("F12", 0x7B),
-    ("Scroll Lock", 0x91),
-    ("Pause / Break", 0x13),
-    ("Insert", 0x2D),
-    ("Tilde (~)", 0xC0),
+pub const POPULAR_HOTKEYS: &[(&str, KeyCombo)] = &[
+    ("F8 (Wflow Default)", KeyCombo::single(0x77)),
+    ("F9 (Toggle Default)", KeyCombo::single(0x78)),
+    ("Ctrl + Space", KeyCombo::combo(true, false, false, false, 0x20)),
+    ("Alt + Space", KeyCombo::combo(false, true, false, false, 0x20)),
+    ("Ctrl + Shift + D", KeyCombo::combo(true, false, true, false, 0x44)),
+    ("Win + H", KeyCombo::combo(false, false, false, true, 0x48)),
+    ("Ctrl + Alt + V", KeyCombo::combo(true, true, false, false, 0x56)),
+    ("Right Control", KeyCombo::single(0xA3)),
+    ("Left Control", KeyCombo::single(0xA2)),
+    ("Right Alt", KeyCombo::single(0xA5)),
+    ("Left Alt", KeyCombo::single(0xA4)),
+    ("Caps Lock", KeyCombo::single(0x14)),
+    ("F1", KeyCombo::single(0x70)),
+    ("F2", KeyCombo::single(0x71)),
+    ("F3", KeyCombo::single(0x72)),
+    ("F4", KeyCombo::single(0x73)),
+    ("F5", KeyCombo::single(0x74)),
+    ("F6", KeyCombo::single(0x75)),
+    ("F7", KeyCombo::single(0x76)),
+    ("F8", KeyCombo::single(0x77)),
+    ("F9", KeyCombo::single(0x78)),
+    ("F10", KeyCombo::single(0x79)),
+    ("F11", KeyCombo::single(0x7A)),
+    ("F12", KeyCombo::single(0x7B)),
+    ("Scroll Lock", KeyCombo::single(0x91)),
+    ("Pause / Break", KeyCombo::single(0x13)),
+    ("Insert", KeyCombo::single(0x2D)),
+    ("Tilde (~)", KeyCombo::single(0xC0)),
 ];
 
 const LANGUAGE_OPTIONS: &[(&str, &str)] = &[
@@ -163,8 +169,8 @@ impl WisprFlowGui {
             endpoint,
             token,
             language,
-            hotkey_vk,
-            toggle_vk,
+            hotkey,
+            toggle,
             auto_paste,
             auto_start,
             stt_provider,
@@ -184,8 +190,8 @@ impl WisprFlowGui {
                 cfg.endpoint_url.clone(),
                 cfg.auth_token.clone().unwrap_or_default(),
                 cfg.language_code.clone(),
-                cfg.hotkey_vk,
-                cfg.toggle_window_vk,
+                cfg.hotkey,
+                cfg.toggle_window,
                 cfg.auto_paste,
                 cfg.auto_start,
                 cfg.stt_provider,
@@ -210,8 +216,8 @@ impl WisprFlowGui {
             settings_endpoint: endpoint,
             settings_token: token,
             settings_language: language,
-            settings_hotkey_vk: hotkey_vk,
-            settings_toggle_vk: toggle_vk,
+            settings_hotkey: hotkey,
+            settings_toggle: toggle,
             recording_mode: None,
             settings_auto_paste: auto_paste,
             settings_auto_start: auto_start,
@@ -421,17 +427,17 @@ impl eframe::App for WisprFlowGui {
 
         // Handle recorded key from low-level hook
         if let Ok(mut lock) = self.state.recorded_key.lock() {
-            if let Some((mode, vk)) = lock.take() {
+            if let Some((mode, combo)) = lock.take() {
                 self.recording_mode = None;
-                if vk == 0 {
+                if combo.is_empty() {
                     self.state.set_toast("Key recording cancelled");
                 } else {
-                    let key_name = vk_to_string(vk);
+                    let key_name = combo.format_display();
                     if mode == 1 {
-                        self.settings_hotkey_vk = vk;
+                        self.settings_hotkey = combo;
                         self.state.set_toast(&format!("Dictation hotkey changed to: {}", key_name));
                     } else if mode == 2 {
-                        self.settings_toggle_vk = vk;
+                        self.settings_toggle = combo;
                         self.state.set_toast(&format!("Window Toggle hotkey changed to: {}", key_name));
                     }
                 }
@@ -451,8 +457,8 @@ impl eframe::App for WisprFlowGui {
         let (dictate_key_name, toggle_key_name) = {
             let cfg = self.state.config.lock().unwrap();
             (
-                vk_to_string(cfg.hotkey_vk),
-                vk_to_string(cfg.toggle_window_vk),
+                cfg.hotkey.format_display(),
+                cfg.toggle_window.format_display(),
             )
         };
 
@@ -1841,7 +1847,7 @@ impl WisprFlowGui {
                                     .font(FontId::proportional(13.0))
                                     .strong(),
                             );
-                            let curr_name = vk_to_string(self.settings_hotkey_vk);
+                            let curr_name = self.settings_hotkey.format_display();
                             let badge = ui.label(
                                 egui::RichText::new(format!(" {} ", curr_name))
                                     .font(FontId::monospace(12.0))
@@ -1856,29 +1862,29 @@ impl WisprFlowGui {
                         });
                         ui.add_space(3.0);
                         ui.label(
-                            egui::RichText::new("Hold this key anywhere in Windows to record voice, release to insert text.")
+                            egui::RichText::new("Hold this key or combination anywhere in Windows to record voice, release to insert text.")
                                 .font(FontId::proportional(11.0))
                                 .color(Color32::from_rgb(148, 163, 184)),
                         );
                         ui.add_space(6.0);
 
                         ui.horizontal(|ui| {
-                            let curr_label = format!("Preset: {}", vk_to_string(self.settings_hotkey_vk));
+                            let curr_label = format!("Preset: {}", self.settings_hotkey.format_display());
                             egui::ComboBox::from_id_salt("hotkey_combo")
                                 .selected_text(curr_label)
                                 .show_ui(ui, |ui| {
-                                    for (name, vk) in POPULAR_HOTKEYS {
-                                        if ui.selectable_label(self.settings_hotkey_vk == *vk, *name).clicked() {
-                                            self.settings_hotkey_vk = *vk;
+                                    for (name, combo) in POPULAR_HOTKEYS {
+                                        if ui.selectable_label(self.settings_hotkey == *combo, *name).clicked() {
+                                            self.settings_hotkey = *combo;
                                         }
                                     }
                                 });
 
                             let is_rec = self.recording_mode == Some(1);
                             let rec_text = if is_rec {
-                                "🔴 Listening for key... (Esc to cancel)"
+                                "🔴 Listening for shortcut combination... (Esc to cancel)"
                             } else {
-                                "⌨️ Press any key to set"
+                                "⌨️ Press any key or combination to set"
                             };
                             let rec_fill = if is_rec {
                                 Color32::from_rgb(225, 29, 72)
@@ -1902,7 +1908,7 @@ impl WisprFlowGui {
                                 } else {
                                     self.recording_mode = Some(1);
                                     PlatformManager::start_recording_hotkey(1);
-                                    self.state.set_toast("Press any key to assign Dictation shortcut (Esc to cancel)");
+                                    self.state.set_toast("Press any combination (e.g. Ctrl+Space, Alt+Space, Ctrl+Shift+D) to set");
                                 }
                             }
                         });
@@ -1918,7 +1924,7 @@ impl WisprFlowGui {
                                     .font(FontId::proportional(13.0))
                                     .strong(),
                             );
-                            let curr_name = vk_to_string(self.settings_toggle_vk);
+                            let curr_name = self.settings_toggle.format_display();
                             let badge = ui.label(
                                 egui::RichText::new(format!(" {} ", curr_name))
                                     .font(FontId::monospace(12.0))
@@ -1933,29 +1939,29 @@ impl WisprFlowGui {
                         });
                         ui.add_space(3.0);
                         ui.label(
-                            egui::RichText::new("Press this key anywhere to toggle Wispr Flow Studio between screen and system tray.")
+                            egui::RichText::new("Press this key or combination anywhere to toggle Wflow Studio between screen and system tray.")
                                 .font(FontId::proportional(11.0))
                                 .color(Color32::from_rgb(148, 163, 184)),
                         );
                         ui.add_space(6.0);
 
                         ui.horizontal(|ui| {
-                            let curr_label = format!("Preset: {}", vk_to_string(self.settings_toggle_vk));
+                            let curr_label = format!("Preset: {}", self.settings_toggle.format_display());
                             egui::ComboBox::from_id_salt("toggle_combo")
                                 .selected_text(curr_label)
                                 .show_ui(ui, |ui| {
-                                    for (name, vk) in POPULAR_HOTKEYS {
-                                        if ui.selectable_label(self.settings_toggle_vk == *vk, *name).clicked() {
-                                            self.settings_toggle_vk = *vk;
+                                    for (name, combo) in POPULAR_HOTKEYS {
+                                        if ui.selectable_label(self.settings_toggle == *combo, *name).clicked() {
+                                            self.settings_toggle = *combo;
                                         }
                                     }
                                 });
 
                             let is_rec = self.recording_mode == Some(2);
                             let rec_text = if is_rec {
-                                "🔴 Listening for key... (Esc to cancel)"
+                                "🔴 Listening for shortcut combination... (Esc to cancel)"
                             } else {
-                                "⌨️ Press any key to set"
+                                "⌨️ Press any key or combination to set"
                             };
                             let rec_fill = if is_rec {
                                 Color32::from_rgb(225, 29, 72)
@@ -1979,7 +1985,7 @@ impl WisprFlowGui {
                                 } else {
                                     self.recording_mode = Some(2);
                                     PlatformManager::start_recording_hotkey(2);
-                                    self.state.set_toast("Press any key to assign Window Toggle shortcut (Esc to cancel)");
+                                    self.state.set_toast("Press any combination (e.g. Alt+Space, Ctrl+Space, F9) to set");
                                 }
                             }
                         });
@@ -2438,8 +2444,10 @@ impl WisprFlowGui {
                 let new_config = AppConfig {
                     endpoint_url: self.settings_endpoint.clone(),
                     user_id: self.state.config.lock().unwrap().user_id.clone(),
-                    hotkey_vk: self.settings_hotkey_vk,
-                    toggle_window_vk: self.settings_toggle_vk,
+                    hotkey: self.settings_hotkey,
+                    toggle_window: self.settings_toggle,
+                    hotkey_vk: self.settings_hotkey.key,
+                    toggle_window_vk: self.settings_toggle.key,
                     stt_provider: self.settings_stt_provider,
                     groq_api_key: if self.settings_groq_api_key.trim().is_empty() {
                         None

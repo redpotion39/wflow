@@ -31,7 +31,7 @@ pub mod mock {
         Released,
         ToggleWindow,
         QuitApp,
-        KeyRecorded(u8, u16),
+        KeyRecorded(u8, crate::config::KeyCombo),
         AutostartToggled(bool),
     }
 
@@ -53,8 +53,8 @@ pub mod mock {
 
         pub fn start_hotkey_listener(
             _tx: mpsc::UnboundedSender<HotkeyEvent>,
-            _initial_hotkey_vk: u16,
-            _initial_toggle_vk: u16,
+            _initial_hotkey: crate::config::KeyCombo,
+            _initial_toggle: crate::config::KeyCombo,
         ) -> Result<std::thread::JoinHandle<()>> {
             Ok(std::thread::spawn(|| {}))
         }
@@ -67,7 +67,15 @@ pub mod mock {
             0x78
         }
 
-        pub fn update_hotkeys(_hotkey_vk: u16, _toggle_vk: u16) {}
+        pub fn get_hotkey_combo() -> crate::config::KeyCombo {
+            crate::config::KeyCombo::single(0x77)
+        }
+
+        pub fn get_toggle_window_combo() -> crate::config::KeyCombo {
+            crate::config::KeyCombo::single(0x78)
+        }
+
+        pub fn update_hotkeys(_hotkey: crate::config::KeyCombo, _toggle: crate::config::KeyCombo) {}
         pub fn start_recording_hotkey(_mode: u8) {}
         pub fn stop_recording_hotkey() {}
         pub fn show_floating_hud(_badge: &str) {}

@@ -4,6 +4,8 @@ use std::thread::JoinHandle;
 use tokio::sync::mpsc;
 use tracing::info;
 
+use crate::config::KeyCombo;
+
 #[derive(Clone, Debug, Default)]
 pub struct ActiveAppContext {
     pub process_name: String,
@@ -20,7 +22,7 @@ pub enum HotkeyEvent {
     Released,
     ToggleWindow,
     QuitApp,
-    KeyRecorded(u8, u16),
+    KeyRecorded(u8, KeyCombo),
     AutostartToggled(bool),
 }
 
@@ -109,14 +111,14 @@ impl PlatformManager {
 
     pub fn start_hotkey_listener(
         tx: mpsc::UnboundedSender<HotkeyEvent>,
-        initial_hotkey_vk: u16,
-        initial_toggle_vk: u16,
+        initial_hotkey: KeyCombo,
+        initial_toggle: KeyCombo,
     ) -> Result<JoinHandle<()>> {
         if let Ok(mut lock) = HOTKEY_VK.lock() {
-            *lock = initial_hotkey_vk;
+            *lock = initial_hotkey.key;
         }
         if let Ok(mut lock) = TOGGLE_VK.lock() {
-            *lock = initial_toggle_vk;
+            *lock = initial_toggle.key;
         }
 
         info!("Starting Linux background hotkey listener thread...");
@@ -137,12 +139,20 @@ impl PlatformManager {
         *TOGGLE_VK.lock().unwrap()
     }
 
-    pub fn update_hotkeys(hotkey_vk: u16, toggle_vk: u16) {
+    pub fn get_hotkey_combo() -> KeyCombo {
+        KeyCombo::single(*HOTKEY_VK.lock().unwrap())
+    }
+
+    pub fn get_toggle_window_combo() -> KeyCombo {
+        KeyCombo::single(*TOGGLE_VK.lock().unwrap())
+    }
+
+    pub fn update_hotkeys(hotkey: KeyCombo, toggle: KeyCombo) {
         if let Ok(mut lock) = HOTKEY_VK.lock() {
-            *lock = hotkey_vk;
+            *lock = hotkey.key;
         }
         if let Ok(mut lock) = TOGGLE_VK.lock() {
-            *lock = toggle_vk;
+            *lock = toggle.key;
         }
     }
 

@@ -52,6 +52,8 @@ pub struct ActiveAppContext {
     pub full_text: Option<String>,
 }
 
+use crate::config::KeyCombo;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyEvent {
     Pressed,
@@ -59,7 +61,7 @@ pub enum HotkeyEvent {
     #[allow(dead_code)]
     ToggleWindow,
     QuitApp,
-    KeyRecorded(u8, u16), // mode (1=Dictate, 2=ToggleWindow), vk_code
+    KeyRecorded(u8, KeyCombo), // mode (1=Dictate, 2=ToggleWindow), combo
     AutostartToggled(bool),
 }
 
@@ -67,9 +69,10 @@ pub enum HotkeyEvent {
 static HOOK_TX: std::sync::Mutex<Option<mpsc::UnboundedSender<HotkeyEvent>>> = std::sync::Mutex::new(None);
 static HOTKEY_DOWN: AtomicBool = AtomicBool::new(false);
 static TOGGLE_DOWN: AtomicBool = AtomicBool::new(false);
-static HOTKEY_VK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x77); // Default F8
-static TOGGLE_WINDOW_VK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x78); // Default F9
+static HOTKEY_COMBO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x77); // Default F8 (single)
+static TOGGLE_WINDOW_COMBO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x78); // Default F9 (single)
 static RECORDING_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0); // 0=None, 1=Dictate, 2=ToggleWindow
+static RECORDING_NON_MOD_PRESSED: AtomicBool = AtomicBool::new(false);
 static TRAY_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static HUD_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static HUD_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0); // 0=Hidden, 1=Listening, 2=Transcribing, 3=Done
@@ -77,6 +80,38 @@ static HUD_AMPLITUDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU3
 static HUD_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static HUD_BADGE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 const WM_TRAY_CALLBACK: u32 = WM_APP + 101;
+
+pub fn is_key_down(vk: i32) -> bool {
+    unsafe {
+        (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk) as u16 & 0x8000) != 0
+    }
+}
+
+pub fn is_modifier_key(vk: u16) -> bool {
+    matches!(
+        vk,
+        0x10 | 0xA0 | 0xA1 // Shift
+        | 0x11 | 0xA2 | 0xA3 // Ctrl
+        | 0x12 | 0xA4 | 0xA5 // Alt
+        | 0x5B | 0x5C // Win
+    )
+}
+
+pub fn current_ctrl_pressed() -> bool {
+    is_key_down(0x11) || is_key_down(0xA2) || is_key_down(0xA3)
+}
+
+pub fn current_alt_pressed() -> bool {
+    is_key_down(0x12) || is_key_down(0xA4) || is_key_down(0xA5)
+}
+
+pub fn current_shift_pressed() -> bool {
+    is_key_down(0x10) || is_key_down(0xA0) || is_key_down(0xA1)
+}
+
+pub fn current_win_pressed() -> bool {
+    is_key_down(0x5B) || is_key_down(0x5C)
+}
 
 pub fn vk_to_string(vk: u16) -> String {
     match vk {
@@ -319,11 +354,11 @@ impl PlatformManager {
     /// Spawns a background low-level keyboard hook monitoring push-to-talk hotkey and manages System Tray icon
     pub fn start_hotkey_listener(
         tx: mpsc::UnboundedSender<HotkeyEvent>,
-        initial_hotkey_vk: u16,
-        initial_toggle_vk: u16,
+        initial_hotkey: KeyCombo,
+        initial_toggle: KeyCombo,
     ) -> Result<std::thread::JoinHandle<()>> {
-        HOTKEY_VK.store(initial_hotkey_vk as u32, Ordering::SeqCst);
-        TOGGLE_WINDOW_VK.store(initial_toggle_vk as u32, Ordering::SeqCst);
+        HOTKEY_COMBO.store(initial_hotkey.to_u32(), Ordering::SeqCst);
+        TOGGLE_WINDOW_COMBO.store(initial_toggle.to_u32(), Ordering::SeqCst);
 
         let handle = std::thread::spawn(move || unsafe {
             if let Ok(mut lock) = HOOK_TX.lock() {
@@ -389,8 +424,8 @@ impl PlatformManager {
 
             let tip = format!(
                 "Wflow\n{}: Dictate | {}: Toggle Window\0",
-                vk_to_string(initial_hotkey_vk),
-                vk_to_string(initial_toggle_vk)
+                initial_hotkey.format_display(),
+                initial_toggle.format_display()
             );
             for (i, ch) in tip.encode_utf16().enumerate() {
                 if i < nid.szTip.len() - 1 {
@@ -400,8 +435,8 @@ impl PlatformManager {
             let _ = Shell_NotifyIconW(NIM_ADD, &nid);
             info!(
                 "System Tray icon registered in Windows Taskbar ({}: Dictate, {}: Toggle Window).",
-                vk_to_string(initial_hotkey_vk),
-                vk_to_string(initial_toggle_vk)
+                initial_hotkey.format_display(),
+                initial_toggle.format_display()
             );
 
             let hook = SetWindowsHookExW(
@@ -414,8 +449,8 @@ impl PlatformManager {
             if let Ok(h) = hook {
                 info!(
                     "Global keyboard hook registered (Dictate: {}, Toggle: {}).",
-                    vk_to_string(initial_hotkey_vk),
-                    vk_to_string(initial_toggle_vk)
+                    initial_hotkey.format_display(),
+                    initial_toggle.format_display()
                 );
 
                 let mut msg = MSG::default();
@@ -440,27 +475,35 @@ impl PlatformManager {
 
     #[allow(dead_code)]
     pub fn get_hotkey_vk() -> u16 {
-        HOTKEY_VK.load(Ordering::SeqCst) as u16
+        Self::get_hotkey_combo().key
     }
 
+    #[allow(dead_code)]
     pub fn get_toggle_window_vk() -> u16 {
-        TOGGLE_WINDOW_VK.load(Ordering::SeqCst) as u16
+        Self::get_toggle_window_combo().key
     }
 
-    pub fn update_hotkeys(hotkey_vk: u16, toggle_vk: u16) {
-        HOTKEY_VK.store(hotkey_vk as u32, Ordering::SeqCst);
-        TOGGLE_WINDOW_VK.store(toggle_vk as u32, Ordering::SeqCst);
+    pub fn get_hotkey_combo() -> KeyCombo {
+        KeyCombo::from_u32(HOTKEY_COMBO.load(Ordering::SeqCst))
+    }
+
+    pub fn get_toggle_window_combo() -> KeyCombo {
+        KeyCombo::from_u32(TOGGLE_WINDOW_COMBO.load(Ordering::SeqCst))
+    }
+
+    pub fn update_hotkeys(hotkey: KeyCombo, toggle: KeyCombo) {
+        HOTKEY_COMBO.store(hotkey.to_u32(), Ordering::SeqCst);
+        TOGGLE_WINDOW_COMBO.store(toggle.to_u32(), Ordering::SeqCst);
         info!(
-            "Updated active hotkeys: Dictate = {} (0x{:02X}), Toggle = {} (0x{:02X})",
-            vk_to_string(hotkey_vk),
-            hotkey_vk,
-            vk_to_string(toggle_vk),
-            toggle_vk,
+            "Updated active hotkeys: Dictate = {}, Toggle = {}",
+            hotkey.format_display(),
+            toggle.format_display(),
         );
-        Self::update_tray_tooltip(hotkey_vk, toggle_vk);
+        Self::update_tray_tooltip(hotkey, toggle);
     }
 
     pub fn start_recording_hotkey(mode: u8) {
+        RECORDING_NON_MOD_PRESSED.store(false, Ordering::SeqCst);
         RECORDING_MODE.store(mode, Ordering::SeqCst);
         info!("Hotkey recording mode set to: {}", mode);
     }
@@ -657,7 +700,7 @@ impl PlatformManager {
         }
     }
 
-    pub fn update_tray_tooltip(hotkey_vk: u16, toggle_vk: u16) {
+    pub fn update_tray_tooltip(hotkey: KeyCombo, toggle: KeyCombo) {
         unsafe {
             let val = TRAY_HWND.load(Ordering::SeqCst);
             if val != 0 {
@@ -670,8 +713,8 @@ impl PlatformManager {
 
                 let tip = format!(
                     "Wflow\n{}: Dictate | {}: Toggle Window\0",
-                    vk_to_string(hotkey_vk),
-                    vk_to_string(toggle_vk),
+                    hotkey.format_display(),
+                    toggle.format_display(),
                 );
                 for (i, ch) in tip.encode_utf16().enumerate() {
                     if i < nid.szTip.len() - 1 {
@@ -888,7 +931,7 @@ unsafe extern "system" fn tray_wnd_proc(
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
             if let Ok(hmenu) = CreatePopupMenu() {
-                let toggle_name = vk_to_string(PlatformManager::get_toggle_window_vk());
+                let toggle_name = PlatformManager::get_toggle_window_combo().format_display();
                 let open_str = format!("Open Wflow ({})\0", toggle_name);
                 let open_wide: Vec<u16> = open_str.encode_utf16().collect();
 
@@ -973,45 +1016,141 @@ unsafe extern "system" fn low_level_keyboard_proc(
         let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
         let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
 
-        // 1. If currently in hotkey recording mode, capture the key
+        // 1. If currently in hotkey recording mode, capture the combination
         let rec_mode = RECORDING_MODE.load(Ordering::SeqCst);
-        if rec_mode != 0 && is_down {
-            RECORDING_MODE.store(0, Ordering::SeqCst);
-            let captured_vk = if vk_code == 0x1B /* Escape */ { 0 } else { vk_code };
-            if let Ok(guard) = HOOK_TX.lock() {
-                if let Some(tx) = guard.as_ref() {
-                    let _ = tx.send(HotkeyEvent::KeyRecorded(rec_mode, captured_vk));
+        if rec_mode != 0 {
+            if is_down {
+                if vk_code == 0x1B /* Escape */ {
+                    RECORDING_MODE.store(0, Ordering::SeqCst);
+                    if let Ok(guard) = HOOK_TX.lock() {
+                        if let Some(tx) = guard.as_ref() {
+                            let _ = tx.send(HotkeyEvent::KeyRecorded(rec_mode, KeyCombo::single(0)));
+                        }
+                    }
+                    return LRESULT(1); // Suppress Escape
+                }
+
+                if is_modifier_key(vk_code) {
+                    // User pressed a modifier key (Ctrl, Alt, Shift, Win)
+                    // Keep waiting for the base key
+                    return CallNextHookEx(None, n_code, w_param, l_param);
+                } else {
+                    // Non-modifier key pressed! Combo is complete!
+                    RECORDING_NON_MOD_PRESSED.store(true, Ordering::SeqCst);
+                    RECORDING_MODE.store(0, Ordering::SeqCst);
+
+                    let ctrl = current_ctrl_pressed();
+                    let alt = current_alt_pressed();
+                    let shift = current_shift_pressed();
+                    let win = current_win_pressed();
+
+                    let combo = KeyCombo::combo(ctrl, alt, shift, win, vk_code);
+                    info!("Recorded hotkey combo: {:?}", combo);
+
+                    if let Ok(guard) = HOOK_TX.lock() {
+                        if let Some(tx) = guard.as_ref() {
+                            let _ = tx.send(HotkeyEvent::KeyRecorded(rec_mode, combo));
+                        }
+                    }
+                    return LRESULT(1); // Suppress base key
+                }
+            } else if is_up {
+                // If a modifier was released and no non-modifier key was pressed,
+                // the user intended to set just this single modifier key (e.g. Right Control)
+                if is_modifier_key(vk_code) && !RECORDING_NON_MOD_PRESSED.load(Ordering::SeqCst) {
+                    RECORDING_MODE.store(0, Ordering::SeqCst);
+                    let combo = KeyCombo::single(vk_code);
+                    info!("Recorded single modifier hotkey: {:?}", combo);
+
+                    if let Ok(guard) = HOOK_TX.lock() {
+                        if let Some(tx) = guard.as_ref() {
+                            let _ = tx.send(HotkeyEvent::KeyRecorded(rec_mode, combo));
+                        }
+                    }
+                    return LRESULT(1);
                 }
             }
-            return LRESULT(1); // Suppress recorded key press
+            return CallNextHookEx(None, n_code, w_param, l_param);
         }
 
         // 2. Normal hotkey monitoring
-        let hotkey_vk = HOTKEY_VK.load(Ordering::SeqCst) as u16;
-        let toggle_vk = TOGGLE_WINDOW_VK.load(Ordering::SeqCst) as u16;
+        let hotkey = KeyCombo::from_u32(HOTKEY_COMBO.load(Ordering::SeqCst));
+        let toggle = KeyCombo::from_u32(TOGGLE_WINDOW_COMBO.load(Ordering::SeqCst));
 
-        if matches_vk(vk_code, hotkey_vk) {
-            if is_down && !HOTKEY_DOWN.load(Ordering::SeqCst) {
-                HOTKEY_DOWN.store(true, Ordering::SeqCst);
-                if let Ok(guard) = HOOK_TX.lock() {
-                    if let Some(tx) = guard.as_ref() {
-                        let _ = tx.send(HotkeyEvent::Pressed);
+        // Check Dictation Hotkey
+        let is_hotkey_base = matches_vk(vk_code, hotkey.key);
+        if is_hotkey_base || (HOTKEY_DOWN.load(Ordering::SeqCst) && is_up) {
+            let ctrl_matches = hotkey.ctrl == current_ctrl_pressed() || (hotkey.ctrl && matches!(vk_code, 0x11 | 0xA2 | 0xA3));
+            let alt_matches = hotkey.alt == current_alt_pressed() || (hotkey.alt && matches!(vk_code, 0x12 | 0xA4 | 0xA5));
+            let shift_matches = hotkey.shift == current_shift_pressed() || (hotkey.shift && matches!(vk_code, 0x10 | 0xA0 | 0xA1));
+            let win_matches = hotkey.win == current_win_pressed() || (hotkey.win && matches!(vk_code, 0x5B | 0x5C));
+
+            let all_modifiers_match = ctrl_matches && alt_matches && shift_matches && win_matches;
+
+            if is_down && is_hotkey_base && all_modifiers_match {
+                if !HOTKEY_DOWN.load(Ordering::SeqCst) {
+                    HOTKEY_DOWN.store(true, Ordering::SeqCst);
+                    if let Ok(guard) = HOOK_TX.lock() {
+                        if let Some(tx) = guard.as_ref() {
+                            let _ = tx.send(HotkeyEvent::Pressed);
+                        }
                     }
                 }
+                if hotkey.has_modifiers() {
+                    return LRESULT(1); // Suppress key typing into application
+                }
             } else if is_up && HOTKEY_DOWN.load(Ordering::SeqCst) {
-                HOTKEY_DOWN.store(false, Ordering::SeqCst);
-                if let Ok(guard) = HOOK_TX.lock() {
-                    if let Some(tx) = guard.as_ref() {
-                        let _ = tx.send(HotkeyEvent::Released);
+                let is_released = is_hotkey_base
+                    || (hotkey.ctrl && matches!(vk_code, 0x11 | 0xA2 | 0xA3))
+                    || (hotkey.alt && matches!(vk_code, 0x12 | 0xA4 | 0xA5))
+                    || (hotkey.shift && matches!(vk_code, 0x10 | 0xA0 | 0xA1))
+                    || (hotkey.win && matches!(vk_code, 0x5B | 0x5C));
+
+                if is_released {
+                    HOTKEY_DOWN.store(false, Ordering::SeqCst);
+                    if let Ok(guard) = HOOK_TX.lock() {
+                        if let Some(tx) = guard.as_ref() {
+                            let _ = tx.send(HotkeyEvent::Released);
+                        }
+                    }
+                    if hotkey.has_modifiers() {
+                        return LRESULT(1);
                     }
                 }
             }
-        } else if matches_vk(vk_code, toggle_vk) {
-            if is_down && !TOGGLE_DOWN.load(Ordering::SeqCst) {
-                TOGGLE_DOWN.store(true, Ordering::SeqCst);
-                PlatformManager::toggle_main_window();
-            } else if is_up {
-                TOGGLE_DOWN.store(false, Ordering::SeqCst);
+        }
+
+        // Check Window Toggle Hotkey
+        let is_toggle_base = matches_vk(vk_code, toggle.key);
+        if is_toggle_base || (TOGGLE_DOWN.load(Ordering::SeqCst) && is_up) {
+            let ctrl_matches = toggle.ctrl == current_ctrl_pressed() || (toggle.ctrl && matches!(vk_code, 0x11 | 0xA2 | 0xA3));
+            let alt_matches = toggle.alt == current_alt_pressed() || (toggle.alt && matches!(vk_code, 0x12 | 0xA4 | 0xA5));
+            let shift_matches = toggle.shift == current_shift_pressed() || (toggle.shift && matches!(vk_code, 0x10 | 0xA0 | 0xA1));
+            let win_matches = toggle.win == current_win_pressed() || (toggle.win && matches!(vk_code, 0x5B | 0x5C));
+
+            let all_modifiers_match = ctrl_matches && alt_matches && shift_matches && win_matches;
+
+            if is_down && is_toggle_base && all_modifiers_match {
+                if !TOGGLE_DOWN.load(Ordering::SeqCst) {
+                    TOGGLE_DOWN.store(true, Ordering::SeqCst);
+                    PlatformManager::toggle_main_window();
+                }
+                if toggle.has_modifiers() {
+                    return LRESULT(1); // Suppress key
+                }
+            } else if is_up && TOGGLE_DOWN.load(Ordering::SeqCst) {
+                let is_released = is_toggle_base
+                    || (toggle.ctrl && matches!(vk_code, 0x11 | 0xA2 | 0xA3))
+                    || (toggle.alt && matches!(vk_code, 0x12 | 0xA4 | 0xA5))
+                    || (toggle.shift && matches!(vk_code, 0x10 | 0xA0 | 0xA1))
+                    || (toggle.win && matches!(vk_code, 0x5B | 0x5C));
+
+                if is_released {
+                    TOGGLE_DOWN.store(false, Ordering::SeqCst);
+                    if toggle.has_modifiers() {
+                        return LRESULT(1);
+                    }
+                }
             }
         }
     }

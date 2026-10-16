@@ -4,10 +4,124 @@ use tracing::info;
 
 use crate::stt::SttProvider;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyCombo {
+    #[serde(default)]
+    pub ctrl: bool,
+    #[serde(default)]
+    pub alt: bool,
+    #[serde(default)]
+    pub shift: bool,
+    #[serde(default)]
+    pub win: bool,
+    #[serde(default)]
+    pub key: u16,
+}
+
+impl Default for KeyCombo {
+    fn default() -> Self {
+        Self::single(0x77) // F8
+    }
+}
+
+impl KeyCombo {
+    pub const fn single(key: u16) -> Self {
+        Self {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            win: false,
+            key,
+        }
+    }
+
+    pub const fn combo(ctrl: bool, alt: bool, shift: bool, win: bool, key: u16) -> Self {
+        Self {
+            ctrl,
+            alt,
+            shift,
+            win,
+            key,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.key == 0 && !self.ctrl && !self.alt && !self.shift && !self.win
+    }
+
+    pub fn has_modifiers(&self) -> bool {
+        self.ctrl || self.alt || self.shift || self.win
+    }
+
+    pub fn to_u32(&self) -> u32 {
+        let mut val = self.key as u32;
+        if self.ctrl {
+            val |= 1 << 16;
+        }
+        if self.alt {
+            val |= 1 << 17;
+        }
+        if self.shift {
+            val |= 1 << 18;
+        }
+        if self.win {
+            val |= 1 << 19;
+        }
+        val
+    }
+
+    pub fn from_u32(val: u32) -> Self {
+        Self {
+            key: (val & 0xFFFF) as u16,
+            ctrl: (val & (1 << 16)) != 0,
+            alt: (val & (1 << 17)) != 0,
+            shift: (val & (1 << 18)) != 0,
+            win: (val & (1 << 19)) != 0,
+        }
+    }
+
+    pub fn format_display(&self) -> String {
+        let mut parts = Vec::new();
+        if self.ctrl {
+            parts.push("Ctrl".to_string());
+        }
+        if self.alt {
+            parts.push("Alt".to_string());
+        }
+        if self.shift {
+            parts.push("Shift".to_string());
+        }
+        if self.win {
+            parts.push("Win".to_string());
+        }
+        if self.key != 0 {
+            // Check if key is modifier itself and already printed
+            let is_mod_dup = (self.ctrl && matches!(self.key, 0x11 | 0xA2 | 0xA3))
+                || (self.alt && matches!(self.key, 0x12 | 0xA4 | 0xA5))
+                || (self.shift && matches!(self.key, 0x10 | 0xA0 | 0xA1))
+                || (self.win && matches!(self.key, 0x5B | 0x5C));
+            if !is_mod_dup {
+                let name = crate::platform::vk_to_string(self.key);
+                parts.push(name);
+            }
+        }
+        if parts.is_empty() {
+            "None".to_string()
+        } else {
+            parts.join(" + ")
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub endpoint_url: String,
     pub user_id: String,
+    #[serde(default = "default_hotkey_combo")]
+    pub hotkey: KeyCombo,
+    #[serde(default = "default_toggle_combo")]
+    pub toggle_window: KeyCombo,
+    #[serde(default = "default_hotkey_vk")]
     pub hotkey_vk: u16,
     #[serde(default = "default_toggle_window_vk")]
     pub toggle_window_vk: u16,
@@ -39,6 +153,18 @@ pub struct AppConfig {
     pub auto_start: bool,
     #[serde(default)]
     pub auth_token: Option<String>,
+}
+
+fn default_hotkey_combo() -> KeyCombo {
+    KeyCombo::single(0x77) // F8
+}
+
+fn default_toggle_combo() -> KeyCombo {
+    KeyCombo::single(0x78) // F9
+}
+
+fn default_hotkey_vk() -> u16 {
+    0x77 // F8
 }
 
 fn default_toggle_window_vk() -> u16 {
@@ -79,6 +205,8 @@ impl Default for AppConfig {
         Self {
             endpoint_url: "https://inference.wisprflow.com:443".to_string(),
             user_id: uid,
+            hotkey: default_hotkey_combo(),
+            toggle_window: default_toggle_combo(),
             hotkey_vk: 0x77, // F8
             toggle_window_vk: 0x78, // F9
             stt_provider: SttProvider::WisprFlow,
@@ -159,6 +287,19 @@ impl AppConfig {
                         }
                     }
 
+                    // Migrate legacy single vk to KeyCombo if needed
+                    if config.hotkey.is_empty() && config.hotkey_vk != 0 {
+                        config.hotkey = KeyCombo::single(config.hotkey_vk);
+                        modified = true;
+                    }
+                    if config.toggle_window.is_empty() && config.toggle_window_vk != 0 {
+                        config.toggle_window = KeyCombo::single(config.toggle_window_vk);
+                        modified = true;
+                    }
+                    // Sync legacy fields
+                    config.hotkey_vk = config.hotkey.key;
+                    config.toggle_window_vk = config.toggle_window.key;
+
                     if modified {
                         let _ = config.save(Some(&path));
                     }
@@ -180,11 +321,14 @@ impl AppConfig {
     }
 
     pub fn save(&self, custom_path: Option<&Path>) -> anyhow::Result<()> {
+        let mut clone = self.clone();
+        clone.hotkey_vk = clone.hotkey.key;
+        clone.toggle_window_vk = clone.toggle_window.key;
         let path = match custom_path {
             Some(p) => p.to_path_buf(),
             None => Self::default_path(),
         };
-        let json = serde_json::to_string_pretty(self)?;
+        let json = serde_json::to_string_pretty(&clone)?;
         std::fs::write(&path, json)?;
         info!("Saved configuration to {:?}", path);
         Ok(())

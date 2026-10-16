@@ -58,8 +58,8 @@ fn main() -> Result<()> {
     // 5. Start global Win32 low-level keyboard hook
     let _hook_thread = PlatformManager::start_hotkey_listener(
         hotkey_tx,
-        config.hotkey_vk,
-        config.toggle_window_vk,
+        config.hotkey,
+        config.toggle_window,
     )?;
 
     // 6. Spawn background Tokio multi-thread runtime for audio, gRPC & DB
@@ -213,10 +213,10 @@ async fn run_background_coordinator(
                         #[cfg(target_os = "windows")]
                         PlatformManager::toggle_main_window();
                     }
-                    Some(HotkeyEvent::KeyRecorded(mode, vk)) => {
-                        info!("Key recorded: mode={}, vk=0x{:02X}", mode, vk);
+                    Some(HotkeyEvent::KeyRecorded(mode, combo)) => {
+                        info!("Key recorded: mode={}, combo={}", mode, combo.format_display());
                         if let Ok(mut lock) = state.recorded_key.lock() {
-                            *lock = Some((mode, vk));
+                            *lock = Some((mode, combo));
                         }
                         if let Ok(lock) = state.egui_ctx.lock() {
                             if let Some(ctx) = lock.as_ref() {
@@ -325,7 +325,7 @@ async fn run_background_coordinator(
                     }
                     Some(GuiEvent::SaveConfig(new_cfg)) => {
                         let _ = new_cfg.save(None);
-                        PlatformManager::update_hotkeys(new_cfg.hotkey_vk, new_cfg.toggle_window_vk);
+                        PlatformManager::update_hotkeys(new_cfg.hotkey, new_cfg.toggle_window);
                         let _ = PlatformManager::set_autostart(new_cfg.auto_start);
                         if let Ok(mut lock) = state.config.lock() {
                             *lock = new_cfg;
@@ -939,5 +939,37 @@ mod tests {
         sound::play_sound(sound::SoundEffect::StartRecording);
         sound::play_sound(sound::SoundEffect::FinishRecording);
         sound::play_sound(sound::SoundEffect::Error);
+    }
+
+    #[test]
+    fn test_key_combo_display_and_packing() {
+        use crate::config::KeyCombo;
+
+        // Single key
+        let f8 = KeyCombo::single(0x77);
+        assert_eq!(f8.format_display(), "F8");
+        assert!(!f8.has_modifiers());
+        assert_eq!(KeyCombo::from_u32(f8.to_u32()), f8);
+
+        // Ctrl + Space
+        let ctrl_space = KeyCombo::combo(true, false, false, false, 0x20);
+        assert_eq!(ctrl_space.format_display(), "Ctrl + Space");
+        assert!(ctrl_space.has_modifiers());
+        assert_eq!(KeyCombo::from_u32(ctrl_space.to_u32()), ctrl_space);
+
+        // Alt + Space
+        let alt_space = KeyCombo::combo(false, true, false, false, 0x20);
+        assert_eq!(alt_space.format_display(), "Alt + Space");
+        assert_eq!(KeyCombo::from_u32(alt_space.to_u32()), alt_space);
+
+        // Ctrl + Shift + D
+        let ctrl_shift_d = KeyCombo::combo(true, false, true, false, 0x44);
+        assert_eq!(ctrl_shift_d.format_display(), "Ctrl + Shift + D");
+        assert_eq!(KeyCombo::from_u32(ctrl_shift_d.to_u32()), ctrl_shift_d);
+
+        // Win + H
+        let win_h = KeyCombo::combo(false, false, false, true, 0x48);
+        assert_eq!(win_h.format_display(), "Win + H");
+        assert_eq!(KeyCombo::from_u32(win_h.to_u32()), win_h);
     }
 }
