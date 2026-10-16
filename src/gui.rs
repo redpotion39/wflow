@@ -491,258 +491,434 @@ impl eframe::App for WisprFlowGui {
             ctx.request_repaint();
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Header Bar
-            self.render_header(ui, status, is_rec, &dictate_key_name, &toggle_key_name);
+        // 1. Modern Left Sidebar Navigation
+        egui::SidePanel::left("wflow_left_sidebar")
+            .resizable(false)
+            .exact_width(220.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(12, 16, 26))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(26, 36, 54)))
+                    .inner_margin(egui::Margin::symmetric(14.0, 16.0)),
+            )
+            .show(ctx, |ui| {
+                self.render_sidebar(ui, &dictate_key_name, &toggle_key_name);
+            });
 
-            ui.add_space(8.0);
+        // 2. Main Central Area
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(15, 20, 32))
+                    .inner_margin(egui::Margin::symmetric(20.0, 16.0)),
+            )
+            .show(ctx, |ui| {
+                // Top Action & Status Bar
+                self.render_top_bar(ui, status, is_rec, &dictate_key_name, &toggle_key_name);
 
-            // Tab Navigation
-            self.render_tab_nav(ui);
+                ui.add_space(14.0);
 
-            ui.add_space(10.0);
+                // Active Tab View
+                match self.active_tab {
+                    ActiveTab::Studio => self.render_studio_tab(ui, is_rec, amplitude, status, &dictate_key_name),
+                    ActiveTab::History => self.render_history_tab(ui),
+                    ActiveTab::Dictionary => self.render_dictionary_tab(ui),
+                    ActiveTab::Settings => self.render_settings_tab(ui),
+                }
 
-            // Active Tab Content
-            match self.active_tab {
-                ActiveTab::Studio => self.render_studio_tab(ui, is_rec, amplitude, status, &dictate_key_name),
-                ActiveTab::History => self.render_history_tab(ui),
-                ActiveTab::Dictionary => self.render_dictionary_tab(ui),
-                ActiveTab::Settings => self.render_settings_tab(ui),
-            }
-
-            // Toast notification overlay
-            self.render_toast(ui);
-        });
+                // Toast notification overlay
+                self.render_toast(ui);
+            });
     }
 }
 
 impl WisprFlowGui {
-    fn render_header(
+    fn render_sidebar(
+        &mut self,
+        ui: &mut egui::Ui,
+        dictate_key_name: &str,
+        toggle_key_name: &str,
+    ) {
+        ui.vertical(|ui| {
+            // App Brand Header
+            ui.horizontal(|ui| {
+                let (logo_rect, _) = ui.allocate_exact_size(Vec2::new(36.0, 36.0), Sense::hover());
+                if let Some(texture) = &self.logo_texture {
+                    ui.painter().rect_filled(
+                        logo_rect.expand(1.5),
+                        Rounding::same(9.0),
+                        Color32::from_rgba_premultiplied(99, 102, 241, 45),
+                    );
+                    ui.painter().image(
+                        texture.id(),
+                        logo_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                } else {
+                    ui.painter().rect_filled(
+                        logo_rect,
+                        Rounding::same(9.0),
+                        Color32::from_rgb(49, 46, 129),
+                    );
+                    ui.painter().text(
+                        logo_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "🎙️",
+                        FontId::proportional(16.0),
+                        Color32::WHITE,
+                    );
+                }
+
+                ui.add_space(8.0);
+
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("WFLOW")
+                                .font(FontId::proportional(17.0))
+                                .strong()
+                                .color(Color32::WHITE),
+                        );
+                        let rust_badge = ui.label(
+                            egui::RichText::new("RUST")
+                                .font(FontId::proportional(9.5))
+                                .color(Color32::from_rgb(165, 180, 252))
+                                .strong(),
+                        );
+                        ui.painter().rect_filled(
+                            rust_badge.rect.expand(2.0),
+                            Rounding::same(3.0),
+                            Color32::from_rgba_unmultiplied(99, 102, 241, 45),
+                        );
+                    });
+                    ui.label(
+                        egui::RichText::new("AI Voice Studio")
+                            .font(FontId::proportional(11.0))
+                            .color(Color32::from_rgb(148, 163, 184)),
+                    );
+                });
+            });
+
+            ui.add_space(14.0);
+            ui.separator();
+            ui.add_space(10.0);
+
+            // Navigation Menu
+            let history_count = self.state.history.lock().unwrap().len();
+            let dict_count = self.state.dictionary_entries.lock().unwrap().len();
+
+            let nav_items = [
+                (ActiveTab::Studio, "🎙️", "Live Studio", None),
+                (ActiveTab::History, "📜", "History", Some(history_count)),
+                (ActiveTab::Dictionary, "📖", "Dictionary", Some(dict_count)),
+                (ActiveTab::Settings, "⚙️", "Settings", None),
+            ];
+
+            for (tab, icon, label, count) in nav_items {
+                let is_active = self.active_tab == tab;
+                let (btn_rect, response) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), 38.0),
+                    Sense::click(),
+                );
+
+                let is_hovered = response.hovered();
+                let bg_color = if is_active {
+                    Color32::from_rgb(79, 70, 229)
+                } else if is_hovered {
+                    Color32::from_rgb(26, 35, 52)
+                } else {
+                    Color32::TRANSPARENT
+                };
+
+                ui.painter().rect_filled(btn_rect, Rounding::same(8.0), bg_color);
+
+                if is_active {
+                    let accent_rect = Rect::from_min_max(
+                        btn_rect.min,
+                        Pos2::new(btn_rect.min.x + 3.5, btn_rect.max.y),
+                    );
+                    ui.painter().rect_filled(
+                        accent_rect,
+                        Rounding::same(2.0),
+                        Color32::from_rgb(165, 180, 252),
+                    );
+                }
+
+                let icon_pos = Pos2::new(btn_rect.min.x + 12.0, btn_rect.center().y);
+                ui.painter().text(
+                    icon_pos,
+                    egui::Align2::LEFT_CENTER,
+                    icon,
+                    FontId::proportional(15.0),
+                    Color32::WHITE,
+                );
+
+                let text_pos = Pos2::new(btn_rect.min.x + 38.0, btn_rect.center().y);
+                let text_color = if is_active {
+                    Color32::WHITE
+                } else if is_hovered {
+                    Color32::from_rgb(241, 245, 249)
+                } else {
+                    Color32::from_rgb(160, 174, 192)
+                };
+                ui.painter().text(
+                    text_pos,
+                    egui::Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(13.0),
+                    text_color,
+                );
+
+                if let Some(c) = count {
+                    if c > 0 {
+                        let badge_text = format!("{}", c);
+                        let badge_pos = Pos2::new(btn_rect.max.x - 14.0, btn_rect.center().y);
+                        let badge_bg = if is_active {
+                            Color32::from_rgb(99, 102, 241)
+                        } else {
+                            Color32::from_rgb(33, 44, 66)
+                        };
+                        let badge_color = if is_active {
+                            Color32::WHITE
+                        } else {
+                            Color32::from_rgb(148, 163, 184)
+                        };
+                        let badge_rect = Rect::from_center_size(badge_pos, Vec2::new(24.0, 18.0));
+                        ui.painter().rect_filled(badge_rect, Rounding::same(9.0), badge_bg);
+                        ui.painter().text(
+                            badge_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            &badge_text,
+                            FontId::proportional(10.5),
+                            badge_color,
+                        );
+                    }
+                }
+
+                if response.clicked() {
+                    self.active_tab = tab;
+                    if tab == ActiveTab::History {
+                        let _ = self.event_tx.send(GuiEvent::RefreshHistory);
+                    } else if tab == ActiveTab::Dictionary {
+                        let _ = self.event_tx.send(GuiEvent::RefreshDictionary);
+                    }
+                }
+
+                ui.add_space(4.0);
+            }
+
+            // Bottom System Status Card
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                ui.add_space(4.0);
+
+                let hide_btn = egui::Button::new(
+                    egui::RichText::new(format!("📌 Minimize ({})", toggle_key_name))
+                        .font(FontId::proportional(11.5))
+                        .color(Color32::from_rgb(203, 213, 225)),
+                )
+                .fill(Color32::from_rgb(22, 29, 44))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(38, 50, 74)))
+                .rounding(Rounding::same(7.0))
+                .min_size(Vec2::new(ui.available_width(), 32.0));
+
+                if ui.add(hide_btn).clicked() {
+                    #[cfg(target_os = "windows")]
+                    crate::platform::windows::PlatformManager::hide_main_window();
+                    self.state.window_visible.store(false, Ordering::SeqCst);
+                    self.state.set_toast(&format!("Minimized to Tray. Press {} to reopen.", toggle_key_name));
+                }
+
+                ui.add_space(8.0);
+
+                // Status info card
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(17, 23, 36))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(30, 41, 64)))
+                    .rounding(Rounding::same(9.0))
+                    .inner_margin(egui::Margin::same(10.0))
+                    .show(ui, |ui| {
+                        let cfg = self.state.config.lock().unwrap();
+                        let prov_badge = match cfg.stt_provider {
+                            SttProvider::WisprFlow => ("⚡ Wispr Flow", Color32::from_rgb(129, 140, 248)),
+                            SttProvider::Groq => ("🚀 Groq Whisper", Color32::from_rgb(251, 146, 60)),
+                            SttProvider::ElevenLabs => ("🎙️ ElevenLabs", Color32::from_rgb(192, 132, 252)),
+                        };
+
+                        let mic_label = if let Some(ref m) = cfg.input_device_name {
+                            if m.len() > 18 {
+                                format!("{}...", &m[..15])
+                            } else {
+                                m.clone()
+                            }
+                        } else {
+                            "Default Mic".to_string()
+                        };
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("ENGINE")
+                                    .font(FontId::proportional(9.0))
+                                    .color(Color32::from_rgb(148, 163, 184)),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(
+                                    egui::RichText::new(prov_badge.0)
+                                        .font(FontId::proportional(10.5))
+                                        .color(prov_badge.1)
+                                        .strong(),
+                                );
+                            });
+                        });
+
+                        ui.add_space(4.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("MIC")
+                                    .font(FontId::proportional(9.0))
+                                    .color(Color32::from_rgb(148, 163, 184)),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("🎤 {}", mic_label))
+                                        .font(FontId::proportional(10.5))
+                                        .color(Color32::from_rgb(203, 213, 225)),
+                                );
+                            });
+                        });
+
+                        ui.add_space(4.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("HOTKEY")
+                                    .font(FontId::proportional(9.0))
+                                    .color(Color32::from_rgb(148, 163, 184)),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("[{}]", dictate_key_name))
+                                        .font(FontId::monospace(10.5))
+                                        .color(Color32::from_rgb(56, 189, 248))
+                                        .strong(),
+                                );
+                            });
+                        });
+                    });
+
+                ui.add_space(8.0);
+            });
+        });
+    }
+
+    fn render_top_bar(
         &mut self,
         ui: &mut egui::Ui,
         status: DictationStatus,
         _is_rec: bool,
         dictate_key_name: &str,
-        toggle_key_name: &str,
+        _toggle_key_name: &str,
     ) {
-        egui::Frame::none()
-            .fill(Color32::from_rgb(15, 20, 32))
-            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(30, 41, 64)))
-            .rounding(Rounding::same(12.0))
-            .inner_margin(egui::Margin::symmetric(14.0, 10.0))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    // Logo Icon: Render the stunning custom Wispr Flow icon artwork
-                    let (logo_rect, _) = ui.allocate_exact_size(Vec2::new(38.0, 38.0), Sense::hover());
-                    if let Some(texture) = &self.logo_texture {
-                        // Soft glow container around icon
-                        ui.painter().rect_filled(
-                            logo_rect.expand(1.5),
-                            Rounding::same(10.0),
-                            Color32::from_rgba_premultiplied(99, 102, 241, 45),
-                        );
-                        ui.painter().image(
-                            texture.id(),
-                            logo_rect,
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
-                    } else {
-                        ui.painter().rect_filled(
-                            logo_rect,
-                            Rounding::same(10.0),
-                            Color32::from_rgb(49, 46, 129),
-                        );
-                        ui.painter().rect_stroke(
-                            logo_rect,
-                            Rounding::same(10.0),
-                            Stroke::new(1.5_f32, Color32::from_rgb(99, 102, 241)),
-                        );
-                        ui.painter().text(
-                            logo_rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "🎙️",
-                            FontId::proportional(18.0),
-                            Color32::WHITE,
-                        );
-                    }
+        ui.horizontal(|ui| {
+            let (title, subtitle) = match self.active_tab {
+                ActiveTab::Studio => ("🎙️ Live Speech Studio", "Zero-latency real-time voice typing"),
+                ActiveTab::History => ("📜 Dictation History", "Search, copy, or re-paste past speech"),
+                ActiveTab::Dictionary => ("📖 Custom Vocabulary & Snippets", "Domain terminology and text expansion shortcuts"),
+                ActiveTab::Settings => ("⚙️ Settings & Audio Hardware", "Configure microphones, AI models, and keyboard shortcuts"),
+            };
 
-                    ui.add_space(6.0);
-
-                    // App Title & Badges
-                    ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("WFLOW")
-                                    .font(FontId::proportional(18.0))
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            );
-
-                            // Native Rust Badge
-                            let rust_badge = ui.label(
-                                egui::RichText::new("NATIVE RUST")
-                                    .font(FontId::proportional(10.5))
-                                    .color(Color32::from_rgb(165, 180, 252))
-                                    .strong(),
-                            );
-                            ui.painter().rect_filled(
-                                rust_badge.rect.expand(2.5),
-                                Rounding::same(4.0),
-                                Color32::from_rgba_unmultiplied(99, 102, 241, 40),
-                            );
-
-                            // Active STT Engine & Model Badge
-                            let cfg = self.state.config.lock().unwrap();
-                            let current_provider = cfg.stt_provider;
-                            let (p_icon, p_name, p_model, p_color) = match current_provider {
-                                SttProvider::WisprFlow => ("⚡", "Wispr Flow", "Cloud Native (gRPC)", Color32::from_rgb(129, 140, 248)),
-                                SttProvider::Groq => ("🚀", "Groq LPU", cfg.groq_model.as_str(), Color32::from_rgb(251, 146, 60)),
-                                SttProvider::ElevenLabs => ("🎙️", "ElevenLabs", cfg.elevenlabs_model.as_str(), Color32::from_rgb(192, 132, 252)),
-                            };
-                            let prov_badge = ui.label(
-                                egui::RichText::new(format!("{} {} • {}", p_icon, p_name, p_model))
-                                    .font(FontId::proportional(11.0))
-                                    .color(p_color)
-                                    .strong(),
-                            );
-                            ui.painter().rect_filled(
-                                prov_badge.rect.expand(2.5),
-                                Rounding::same(4.0),
-                                Color32::from_rgba_unmultiplied(p_color.r(), p_color.g(), p_color.b(), 35),
-                            );
-                            ui.painter().rect_stroke(
-                                prov_badge.rect.expand(2.5),
-                                Rounding::same(4.0),
-                                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(p_color.r(), p_color.g(), p_color.b(), 80)),
-                            );
-                        });
-
-                        ui.label(
-                            egui::RichText::new("Zero Electron • Ultra-Low Latency • Direct Win32 Native Pipeline")
-                                .font(FontId::proportional(11.0))
-                                .color(Color32::from_rgb(148, 163, 184)),
-                        );
-                    });
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Minimize to Tray button
-                        let hide_btn = egui::Button::new(
-                            egui::RichText::new(format!("📌 Hide to Tray ({})", toggle_key_name))
-                                .font(FontId::proportional(12.0))
-                                .color(Color32::from_rgb(203, 213, 225)),
-                        )
-                        .fill(Color32::from_rgb(26, 33, 50))
-                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(45, 58, 86)))
-                        .rounding(Rounding::same(8.0))
-                        .min_size(Vec2::new(132.0, 32.0));
-
-                        if ui.add(hide_btn).clicked() {
-                            #[cfg(target_os = "windows")]
-                            crate::platform::windows::PlatformManager::hide_main_window();
-                            self.state.window_visible.store(false, Ordering::SeqCst);
-                            self.state.set_toast(&format!("Minimized to Taskbar Tray. Press {} to reopen.", toggle_key_name));
-                        }
-
-                        ui.add_space(8.0);
-
-                        // Dynamic Status Pill with pulsing glow
-                        let (status_text, bg_color, border_color) = match status {
-                            DictationStatus::Idle => (
-                                format!("Ready [{}]", dictate_key_name),
-                                Color32::from_rgb(6, 78, 59),
-                                Color32::from_rgb(16, 185, 129),
-                            ),
-                            DictationStatus::Listening => (
-                                "Recording...".to_string(),
-                                Color32::from_rgb(127, 29, 29),
-                                Color32::from_rgb(239, 68, 68),
-                            ),
-                            DictationStatus::Transcribing => (
-                                "AI Transcribing...".to_string(),
-                                Color32::from_rgb(88, 28, 135),
-                                Color32::from_rgb(168, 85, 247),
-                            ),
-                            DictationStatus::Pasting => (
-                                "Pasting Text...".to_string(),
-                                Color32::from_rgb(30, 58, 138),
-                                Color32::from_rgb(59, 130, 246),
-                            ),
-                            DictationStatus::Done => (
-                                "Inserted!".to_string(),
-                                Color32::from_rgb(6, 78, 59),
-                                Color32::from_rgb(16, 185, 129),
-                            ),
-                            DictationStatus::Error => (
-                                "Error".to_string(),
-                                Color32::from_rgb(120, 53, 15),
-                                Color32::from_rgb(245, 158, 11),
-                            ),
-                        };
-
-                        let status_pill = ui.label(
-                            egui::RichText::new(format!("● {}", status_text))
-                                .font(FontId::proportional(12.5))
-                                .color(Color32::WHITE)
-                                .strong(),
-                        );
-                        ui.painter().rect_filled(
-                            status_pill.rect.expand(5.0),
-                            Rounding::same(12.0),
-                            bg_color,
-                        );
-                        ui.painter().rect_stroke(
-                            status_pill.rect.expand(5.0),
-                            Rounding::same(12.0),
-                            Stroke::new(1.0_f32, border_color),
-                        );
-                    });
-                });
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new(title)
+                        .font(FontId::proportional(16.5))
+                        .strong()
+                        .color(Color32::WHITE),
+                );
+                ui.label(
+                    egui::RichText::new(subtitle)
+                        .font(FontId::proportional(11.0))
+                        .color(Color32::from_rgb(148, 163, 184)),
+                );
             });
-    }
 
-    fn render_tab_nav(&mut self, ui: &mut egui::Ui) {
-        let history_count = self.state.history.lock().unwrap().len();
-        let dict_count = self.state.dictionary_entries.lock().unwrap().len();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (status_text, bg_color, border_color) = match status {
+                    DictationStatus::Idle => (
+                        format!("● Ready [{}]", dictate_key_name),
+                        Color32::from_rgb(6, 78, 59),
+                        Color32::from_rgb(16, 185, 129),
+                    ),
+                    DictationStatus::Listening => (
+                        "🔴 Recording...".to_string(),
+                        Color32::from_rgb(127, 29, 29),
+                        Color32::from_rgb(239, 68, 68),
+                    ),
+                    DictationStatus::Transcribing => (
+                        "✨ AI Processing...".to_string(),
+                        Color32::from_rgb(88, 28, 135),
+                        Color32::from_rgb(168, 85, 247),
+                    ),
+                    DictationStatus::Pasting => (
+                        "✍️ Pasting Text...".to_string(),
+                        Color32::from_rgb(30, 58, 138),
+                        Color32::from_rgb(59, 130, 246),
+                    ),
+                    DictationStatus::Done => (
+                        "✔ Inserted!".to_string(),
+                        Color32::from_rgb(6, 78, 59),
+                        Color32::from_rgb(16, 185, 129),
+                    ),
+                    DictationStatus::Error => (
+                        "⚠️ Audio Error".to_string(),
+                        Color32::from_rgb(120, 53, 15),
+                        Color32::from_rgb(245, 158, 11),
+                    ),
+                };
 
-        egui::Frame::none()
-            .fill(Color32::from_rgb(15, 20, 32))
-            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(30, 41, 64)))
-            .rounding(Rounding::same(10.0))
-            .inner_margin(egui::Margin::symmetric(4.0, 4.0))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let tabs = [
-                        (ActiveTab::Studio, "🎙️ Live Studio".to_string()),
-                        (ActiveTab::History, format!("📜 History ({})", history_count)),
-                        (ActiveTab::Dictionary, format!("📖 Dictionary & Snippets ({})", dict_count)),
-                        (ActiveTab::Settings, "⚙️ Settings & Audio".to_string()),
-                    ];
+                let status_pill = ui.label(
+                    egui::RichText::new(status_text)
+                        .font(FontId::proportional(12.0))
+                        .color(Color32::WHITE)
+                        .strong(),
+                );
+                ui.painter().rect_filled(
+                    status_pill.rect.expand(5.0),
+                    Rounding::same(12.0),
+                    bg_color,
+                );
+                ui.painter().rect_stroke(
+                    status_pill.rect.expand(5.0),
+                    Rounding::same(12.0),
+                    Stroke::new(1.0_f32, border_color),
+                );
 
-                    for (tab, label) in tabs {
-                        let is_active = self.active_tab == tab;
-                        let btn = egui::Button::new(
-                            egui::RichText::new(label)
-                                .font(FontId::proportional(12.5))
-                                .color(if is_active { Color32::WHITE } else { Color32::from_rgb(148, 163, 184) })
-                                .strong(),
-                        )
-                        .fill(if is_active { Color32::from_rgb(79, 70, 229) } else { Color32::TRANSPARENT })
-                        .stroke(if is_active { Stroke::new(1.0_f32, Color32::from_rgb(129, 140, 248)) } else { Stroke::NONE })
-                        .rounding(Rounding::same(7.0))
-                        .min_size(Vec2::new(150.0, 32.0));
+                ui.add_space(8.0);
 
-                        if ui.add(btn).clicked() {
-                            self.active_tab = tab;
-                            if tab == ActiveTab::History {
-                                let _ = self.event_tx.send(GuiEvent::RefreshHistory);
-                            } else if tab == ActiveTab::Dictionary {
-                                let _ = self.event_tx.send(GuiEvent::RefreshDictionary);
-                            }
-                        }
-                    }
-                });
+                let active_app = self.state.active_app.lock().unwrap().clone();
+                let app_display = if active_app.process_name.is_empty() {
+                    "Desktop".to_string()
+                } else {
+                    active_app.process_name.clone()
+                };
+
+                let ctx_pill = ui.label(
+                    egui::RichText::new(format!("🎯 Focus: {}", app_display))
+                        .font(FontId::proportional(11.5))
+                        .color(Color32::from_rgb(148, 163, 184)),
+                );
+                ui.painter().rect_filled(
+                    ctx_pill.rect.expand(4.0),
+                    Rounding::same(8.0),
+                    Color32::from_rgb(22, 29, 44),
+                );
+                ui.painter().rect_stroke(
+                    ctx_pill.rect.expand(4.0),
+                    Rounding::same(8.0),
+                    Stroke::new(1.0_f32, Color32::from_rgb(38, 50, 74)),
+                );
             });
+        });
     }
 
     fn render_studio_tab(
@@ -1134,6 +1310,19 @@ impl WisprFlowGui {
                                             self.state.set_toast("Copied transcript to clipboard!");
                                         }
                                     }
+
+                                    ui.add_space(4.0);
+
+                                    // Clear Button
+                                    let clear_btn = egui::Button::new("🗑️ Clear")
+                                        .fill(Color32::from_rgb(33, 43, 64))
+                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(51, 65, 85)))
+                                        .rounding(Rounding::same(6.0));
+
+                                    if ui.add(clear_btn).clicked() {
+                                        *self.state.last_transcript.lock().unwrap() = String::new();
+                                        self.state.set_toast("Transcript cleared");
+                                    }
                                 });
                             }
                         });
@@ -1163,6 +1352,72 @@ impl WisprFlowGui {
                                 ui.label(egui::RichText::new("SQLite Local").font(FontId::proportional(14.0)).strong().color(Color32::from_rgb(56, 189, 248)));
                             });
                         });
+                    });
+
+                ui.add_space(10.0);
+
+                // Recent Activity Card (Mini History in Studio)
+                let recent_items: Vec<_> = self.state.history.lock().unwrap().iter().take(3).cloned().collect();
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(17, 23, 36))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
+                    .rounding(Rounding::same(14.0))
+                    .inner_margin(egui::Margin::same(14.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("🕒  RECENT ACTIVITY")
+                                    .font(FontId::proportional(12.0))
+                                    .color(Color32::from_rgb(148, 163, 184))
+                                    .strong(),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("View All ➔").clicked() {
+                                    self.active_tab = ActiveTab::History;
+                                    let _ = self.event_tx.send(GuiEvent::RefreshHistory);
+                                }
+                            });
+                        });
+                        ui.add_space(6.0);
+
+                        if recent_items.is_empty() {
+                            ui.label(
+                                egui::RichText::new("No recent transcriptions yet. Dictate anywhere to see activity.")
+                                    .font(FontId::proportional(11.0))
+                                    .color(Color32::from_rgb(100, 116, 139)),
+                            );
+                        } else {
+                            for item in recent_items {
+                                ui.horizontal(|ui| {
+                                    let app_label = if item.app.is_empty() { "Desktop" } else { &item.app };
+                                    ui.label(
+                                        egui::RichText::new(format!("⚡ {}", app_label))
+                                            .font(FontId::proportional(10.5))
+                                            .color(Color32::from_rgb(56, 189, 248)),
+                                    );
+                                    let snippet = if item.formatted_text.chars().count() > 32 {
+                                        format!("{}...", item.formatted_text.chars().take(30).collect::<String>())
+                                    } else {
+                                        item.formatted_text.clone()
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(snippet)
+                                            .font(FontId::proportional(11.0))
+                                            .color(Color32::from_rgb(203, 213, 225)),
+                                    );
+
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.small_button("📋").on_hover_text("Copy text").clicked() {
+                                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                                let _ = clipboard.set_text(&item.formatted_text);
+                                                self.state.set_toast("Copied to clipboard!");
+                                            }
+                                        }
+                                    });
+                                });
+                                ui.add_space(2.0);
+                            }
+                        }
                     });
             });
         });

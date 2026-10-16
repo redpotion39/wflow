@@ -95,8 +95,8 @@ fn main() -> Result<()> {
 
     // 7. Launch modern Native GUI on main OS thread
     let mut viewport = eframe::egui::ViewportBuilder::default()
-        .with_inner_size([920.0, 640.0])
-        .with_min_inner_size([760.0, 500.0])
+        .with_inner_size([980.0, 660.0])
+        .with_min_inner_size([820.0, 540.0])
         .with_title("Wflow - AI Voice Studio")
         .with_active(!is_startup)
         .with_visible(!is_startup);
