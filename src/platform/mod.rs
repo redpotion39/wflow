@@ -4,7 +4,13 @@ pub mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::*;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub mod linux;
+
+#[cfg(target_os = "linux")]
+pub use linux::*;
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
 pub mod mock {
     use anyhow::Result;
     use tokio::sync::mpsc;
@@ -73,5 +79,5 @@ pub mod mock {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
 pub use mock::*;

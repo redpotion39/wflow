@@ -102,6 +102,47 @@ cargo run --release
 
 ---
 
+## 📦 Installation & Packaging
+
+### Windows Installer (Inno Setup)
+- **Installer executable**: `dist/Wflow-Setup-0.1.0.exe`
+- Automatically installs `wflow.exe`, creates Start Menu shortcuts, Desktop icon, and optional startup integration.
+- To recompile:
+  ```powershell
+  iscc installer.iss
+  ```
+
+### Linux (Ubuntu / Debian)
+
+#### 1. Install via Debian Package (`.deb`):
+```bash
+sudo dpkg -i dist/wflow_0.1.0_amd64.deb
+sudo apt-get install -f   # Fix any missing system dependencies
+```
+
+#### 2. Install via Universal Install Script:
+```bash
+chmod +x install.sh
+sudo ./install.sh
+```
+
+#### 3. Build `.deb` Package from source on Ubuntu:
+```bash
+# Install Ubuntu build prerequisites
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libasound2-dev libssl-dev libx11-dev libxkbcommon-dev xdotool dpkg-dev
+
+# Build the .deb installer
+bash packaging/linux/build-deb.sh
+```
+The resulting `.deb` package will be placed at `dist/wflow_0.1.0_amd64.deb`.
+
+#### 4. Automated GitHub Actions CI/CD:
+Every push or release automatically triggers `.github/workflows/build-ubuntu.yml` to build the Ubuntu `.deb` package and Linux tarball artifact ready for direct download.
+
+
+---
+
 ## ⚙️ Configuration
 
 A default `config.json` is automatically created on first run:

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Wflow
+GenericName=AI Voice Dictation
+Comment=High-performance native Rust AI voice dictation studio
+Exec=wflow %u
+Icon=wflow
+Terminal=false
+Categories=Utility;AudioVideo;Audio;
+Keywords=voice;dictation;speech;stt;ai;transcribe;wispr;audio;
+StartupNotify=true
+MimeType=x-scheme-handler/wflow;
+X-GNOME-Autostart-enabled=true

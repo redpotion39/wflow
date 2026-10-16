@@ -7,9 +7,11 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/tray_icon_rec.ico");
     println!("cargo:rerun-if-changed=build.rs");
 
-    #[cfg(windows)]
-    {
-        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "windows" {
+        #[cfg(windows)]
+        {
+            let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
         let res_path = out_dir.join("resource.res");
         let rc_path = out_dir.join("app.rc");
 
@@ -81,4 +83,5 @@ END
             let _ = res.compile();
         }
     }
+}
 }
