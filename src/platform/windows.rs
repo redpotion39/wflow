@@ -35,8 +35,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, HICON, HWND_TOP, ICONINFO, IDI_APPLICATION,
     IMAGE_ICON, KBDLLHOOKSTRUCT, LR_DEFAULTCOLOR, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, SM_CXSCREEN, SM_CXSMICON, SM_CYSCREEN, SM_CYSMICON,
     SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_APP, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
-    WM_PAINT, WM_RBUTTONUP, WM_SETICON, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
+    WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
+    WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETICON, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
 };
 
@@ -944,6 +944,19 @@ unsafe extern "system" fn tray_wnd_proc(
             }
         }
         return LRESULT(0);
+    }
+    if msg == WM_CLOSE || msg == WM_ENDSESSION {
+        info!("Tray window received WM_CLOSE / WM_ENDSESSION, shutting down...");
+        if let Ok(guard) = HOOK_TX.lock() {
+            if let Some(tx) = guard.as_ref() {
+                let _ = tx.send(HotkeyEvent::QuitApp);
+            }
+        }
+        let _ = PostQuitMessage(0);
+        return LRESULT(0);
+    }
+    if msg == WM_QUERYENDSESSION {
+        return LRESULT(1);
     }
     DefWindowProcW(hwnd, msg, w_param, l_param)
 }

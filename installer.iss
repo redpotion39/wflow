@@ -20,7 +20,8 @@ WizardStyle=modern
 PrivilegesRequiredOverridesAllowed=dialog
 PrivilegesRequired=lowest
 UninstallDisplayIcon={app}\{#MyAppExeName}
-CloseApplications=yes
+CloseApplications=force
+CloseApplicationsFilter=*.exe
 RestartApplications=no
 
 [Languages]
@@ -43,3 +44,34 @@ Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilen
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// Force terminate any running wflow.exe instances so files are not locked
+procedure StopWflowProcesses();
+var
+  ResultCode: Integer;
+begin
+  Exec('taskkill.exe', '/F /IM wflow.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(400);
+end;
+
+function InitializeSetup(): Boolean;
+begin
+  StopWflowProcesses();
+  Result := True;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssInstall then
+  begin
+    StopWflowProcesses();
+  end;
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  StopWflowProcesses();
+  Result := True;
+end;
+
