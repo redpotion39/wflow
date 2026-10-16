@@ -84,12 +84,19 @@ fn main() -> Result<()> {
         });
     });
 
+    let is_startup = std::env::args().any(|arg| arg == "--startup" || arg == "--tray" || arg == "--minimized");
+    if is_startup {
+        info!("Launched with startup/minimized flag, starting in tray...");
+        app_state.window_visible.store(false, Ordering::SeqCst);
+    }
+
     // 7. Launch modern Native GUI on main OS thread
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_inner_size([920.0, 640.0])
         .with_min_inner_size([760.0, 500.0])
         .with_title("Wflow - AI Voice Studio")
-        .with_active(true);
+        .with_active(!is_startup)
+        .with_visible(!is_startup);
 
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(icon);
@@ -184,6 +191,24 @@ async fn run_background_coordinator(
                             }
                         }
                     }
+                    Some(HotkeyEvent::AutostartToggled(enabled)) => {
+                        info!("Auto-start toggled from Tray menu: {}", enabled);
+                        if let Ok(mut lock) = state.config.lock() {
+                            lock.auto_start = enabled;
+                            let _ = lock.save(None);
+                        }
+                        let msg = if enabled {
+                            "Auto-start enabled (Wflow will start with Windows)"
+                        } else {
+                            "Auto-start disabled"
+                        };
+                        state.set_toast(msg);
+                        if let Ok(lock) = state.egui_ctx.lock() {
+                            if let Some(ctx) = lock.as_ref() {
+                                ctx.request_repaint();
+                            }
+                        }
+                    }
                     Some(HotkeyEvent::QuitApp) => {
                         info!("Received QuitApp event from Tray menu.");
                         state.pending_quit.store(true, Ordering::SeqCst);
@@ -245,6 +270,7 @@ async fn run_background_coordinator(
                     Some(GuiEvent::SaveConfig(new_cfg)) => {
                         let _ = new_cfg.save(None);
                         PlatformManager::update_hotkeys(new_cfg.hotkey_vk, new_cfg.toggle_window_vk);
+                        let _ = PlatformManager::set_autostart(new_cfg.auto_start);
                         if let Ok(mut lock) = state.config.lock() {
                             *lock = new_cfg;
                         }

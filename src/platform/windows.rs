@@ -14,6 +14,10 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ,
+};
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, IUIAutomationValuePattern, UIA_ValuePatternId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -29,7 +33,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageW, GetSystemMetrics, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, KillTimer,
     LoadIconW, LoadImageW, PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos, SetWindowsHookExW,
     ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, HICON, HWND_TOP, ICONINFO, IDI_APPLICATION,
-    IMAGE_ICON, KBDLLHOOKSTRUCT, LR_DEFAULTCOLOR, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN, SM_CXSMICON, SM_CYSCREEN, SM_CYSMICON,
+    IMAGE_ICON, KBDLLHOOKSTRUCT, LR_DEFAULTCOLOR, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, SM_CXSCREEN, SM_CXSMICON, SM_CYSCREEN, SM_CYSMICON,
     SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON,
     WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_APP, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
     WM_PAINT, WM_RBUTTONUP, WM_SETICON, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
@@ -56,6 +60,7 @@ pub enum HotkeyEvent {
     ToggleWindow,
     QuitApp,
     KeyRecorded(u8, u16), // mode (1=Dictate, 2=ToggleWindow), vk_code
+    AutostartToggled(bool),
 }
 
 // Global hook callback state
@@ -774,6 +779,98 @@ impl PlatformManager {
             ctx.found
         }
     }
+
+    /// Checks if Wflow is configured to automatically start on Windows boot
+    pub fn is_autostart_enabled() -> bool {
+        unsafe {
+            let subkey = windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+            let mut hkey = HKEY::default();
+            if RegOpenKeyExW(HKEY_CURRENT_USER, subkey, 0, KEY_QUERY_VALUE, &mut hkey).is_ok() {
+                let value_name = windows::core::w!("Wflow");
+                let mut data_len = 0u32;
+                let query_res = RegQueryValueExW(
+                    hkey,
+                    value_name,
+                    None,
+                    None,
+                    None,
+                    Some(&mut data_len),
+                );
+                let _ = RegCloseKey(hkey);
+                if query_res.is_ok() && data_len > 0 {
+                    return true;
+                }
+            }
+        }
+
+        // Also check if shortcut exists in Startup folder
+        if let Ok(app_data) = std::env::var("APPDATA") {
+            let shortcut = std::path::PathBuf::from(app_data)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs")
+                .join("Startup")
+                .join("Wflow.lnk");
+            if shortcut.exists() {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Enables or disables autostart on Windows boot via Registry (and clears Startup shortcut if disabling)
+    pub fn set_autostart(enable: bool) -> anyhow::Result<()> {
+        unsafe {
+            let subkey = windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+            let value_name = windows::core::w!("Wflow");
+            let mut hkey = HKEY::default();
+
+            if enable {
+                let exe_path = std::env::current_exe()?;
+                let val_str = format!("\"{}\" --startup\0", exe_path.to_string_lossy());
+                let val_wide: Vec<u16> = val_str.encode_utf16().collect();
+                let byte_slice = std::slice::from_raw_parts(
+                    val_wide.as_ptr() as *const u8,
+                    val_wide.len() * 2,
+                );
+
+                RegOpenKeyExW(HKEY_CURRENT_USER, subkey, 0, KEY_SET_VALUE, &mut hkey).ok()?;
+                let res = RegSetValueExW(
+                    hkey,
+                    value_name,
+                    0,
+                    REG_SZ,
+                    Some(byte_slice),
+                );
+                let _ = RegCloseKey(hkey);
+                res.ok()?;
+                info!("Enabled Windows autostart: {:?}", val_str);
+            } else {
+                if RegOpenKeyExW(HKEY_CURRENT_USER, subkey, 0, KEY_SET_VALUE, &mut hkey).is_ok() {
+                    let _ = RegDeleteValueW(hkey, value_name);
+                    let _ = RegCloseKey(hkey);
+                    info!("Disabled Windows autostart from registry");
+                }
+
+                if let Ok(app_data) = std::env::var("APPDATA") {
+                    let shortcut = std::path::PathBuf::from(app_data)
+                        .join("Microsoft")
+                        .join("Windows")
+                        .join("Start Menu")
+                        .join("Programs")
+                        .join("Startup")
+                        .join("Wflow.lnk");
+                    if shortcut.exists() {
+                        let _ = std::fs::remove_file(shortcut);
+                        info!("Removed Startup folder shortcut");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 unsafe extern "system" fn tray_wnd_proc(
@@ -797,6 +894,18 @@ unsafe extern "system" fn tray_wnd_proc(
 
                 let _ = AppendMenuW(hmenu, MF_STRING, 1, windows::core::PCWSTR(open_wide.as_ptr()));
                 let _ = AppendMenuW(hmenu, MF_STRING, 2, windows::core::w!("Hide to Tray"));
+                let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
+
+                let is_autostart = PlatformManager::is_autostart_enabled();
+                let autostart_str = if is_autostart {
+                    "Start Wflow on Windows Startup\0"
+                } else {
+                    "Start Wflow on Windows Startup\0"
+                };
+                let autostart_wide: Vec<u16> = autostart_str.encode_utf16().collect();
+                let autostart_flags = MF_STRING | if is_autostart { MF_CHECKED } else { MF_UNCHECKED };
+                let _ = AppendMenuW(hmenu, autostart_flags, 4, windows::core::PCWSTR(autostart_wide.as_ptr()));
+
                 let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
                 let _ = AppendMenuW(hmenu, MF_STRING, 3, windows::core::w!("Exit Application"));
 
@@ -823,6 +932,14 @@ unsafe extern "system" fn tray_wnd_proc(
                         }
                     }
                     let _ = PostQuitMessage(0);
+                } else if cmd.0 == 4 {
+                    let new_state = !PlatformManager::is_autostart_enabled();
+                    let _ = PlatformManager::set_autostart(new_state);
+                    if let Ok(guard) = HOOK_TX.lock() {
+                        if let Some(tx) = guard.as_ref() {
+                            let _ = tx.send(HotkeyEvent::AutostartToggled(new_state));
+                        }
+                    }
                 }
             }
         }

@@ -26,6 +26,7 @@ pub mod mock {
         ToggleWindow,
         QuitApp,
         KeyRecorded(u8, u16),
+        AutostartToggled(bool),
     }
 
     pub fn vk_to_string(vk: u16) -> String {
@@ -67,6 +68,8 @@ pub mod mock {
         pub fn set_hud_status(_status: crate::ui::DictationStatus) {}
         pub fn update_hud_amplitude(_amp: f32) {}
         pub fn hide_floating_hud() {}
+        pub fn is_autostart_enabled() -> bool { false }
+        pub fn set_autostart(_enable: bool) -> Result<()> { Ok(()) }
     }
 }
 

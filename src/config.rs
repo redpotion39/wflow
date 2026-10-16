@@ -27,6 +27,8 @@ pub struct AppConfig {
     pub language_code: String,
     pub auto_paste: bool,
     #[serde(default)]
+    pub auto_start: bool,
+    #[serde(default)]
     pub auth_token: Option<String>,
 }
 
@@ -63,6 +65,7 @@ impl Default for AppConfig {
             writing_style: "default".to_string(),
             language_code: "auto".to_string(),
             auto_paste: true,
+            auto_start: false,
             auth_token: token,
         }
     }
@@ -131,13 +134,15 @@ impl AppConfig {
                         let _ = config.save(Some(&path));
                     }
 
-                    info!("Loaded configuration from {:?} (Endpoint: {})", path, config.endpoint_url);
+                    config.auto_start = crate::platform::PlatformManager::is_autostart_enabled();
+                    info!("Loaded configuration from {:?} (Endpoint: {}, Autostart: {})", path, config.endpoint_url, config.auto_start);
                     return config;
                 }
             }
         }
 
-        let default_config = Self::default();
+        let mut default_config = Self::default();
+        default_config.auto_start = crate::platform::PlatformManager::is_autostart_enabled();
         if let Ok(json) = serde_json::to_string_pretty(&default_config) {
             let _ = std::fs::write(&path, json);
         }

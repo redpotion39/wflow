@@ -87,6 +87,7 @@ pub struct WisprFlowGui {
     settings_toggle_vk: u16,
     recording_mode: Option<u8>,
     settings_auto_paste: bool,
+    settings_auto_start: bool,
     settings_stt_provider: SttProvider,
     settings_groq_api_key: String,
     settings_groq_model: String,
@@ -148,6 +149,7 @@ impl WisprFlowGui {
             hotkey_vk,
             toggle_vk,
             auto_paste,
+            auto_start,
             stt_provider,
             groq_key,
             groq_model,
@@ -163,6 +165,7 @@ impl WisprFlowGui {
                 cfg.hotkey_vk,
                 cfg.toggle_window_vk,
                 cfg.auto_paste,
+                cfg.auto_start,
                 cfg.stt_provider,
                 cfg.groq_api_key.clone().unwrap_or_default(),
                 cfg.groq_model.clone(),
@@ -184,6 +187,7 @@ impl WisprFlowGui {
             settings_toggle_vk: toggle_vk,
             recording_mode: None,
             settings_auto_paste: auto_paste,
+            settings_auto_start: auto_start,
             settings_stt_provider: stt_provider,
             settings_groq_api_key: groq_key,
             settings_groq_model: groq_model,
@@ -367,7 +371,16 @@ impl eframe::App for WisprFlowGui {
             crate::platform::windows::PlatformManager::apply_window_icon(
                 crate::platform::windows::PlatformManager::get_app_icon(1)
             );
+            if !self.state.window_visible.load(Ordering::SeqCst) {
+                crate::platform::windows::PlatformManager::hide_main_window();
+            }
             self.window_icon_applied = true;
+        }
+
+        if let Ok(cfg) = self.state.config.try_lock() {
+            if self.settings_auto_start != cfg.auto_start {
+                self.settings_auto_start = cfg.auto_start;
+            }
         }
 
         // Handle recorded key from low-level hook
@@ -1457,6 +1470,32 @@ impl WisprFlowGui {
                         &mut self.settings_auto_paste,
                         "Auto-paste transcribed text directly into active cursor position",
                     );
+
+                    ui.add_space(8.0);
+
+                    // Auto Start Checkbox
+                    let cb = ui.checkbox(
+                        &mut self.settings_auto_start,
+                        "Start Wflow automatically on system startup (Run on Startup)",
+                    );
+                    if cb.changed() {
+                        let _ = PlatformManager::set_autostart(self.settings_auto_start);
+                        if let Ok(mut lock) = self.state.config.lock() {
+                            lock.auto_start = self.settings_auto_start;
+                            let _ = lock.save(None);
+                        }
+                        let msg = if self.settings_auto_start {
+                            "Auto-start on Windows startup enabled"
+                        } else {
+                            "Auto-start on Windows startup disabled"
+                        };
+                        self.state.set_toast(msg);
+                    }
+                    ui.label(
+                        egui::RichText::new("  └ Launches Wflow minimized in the taskbar notification tray when your PC boots.")
+                            .font(FontId::proportional(11.0))
+                            .color(Color32::from_rgb(148, 163, 184)),
+                    );
                 });
 
             ui.add_space(10.0);
@@ -1700,6 +1739,7 @@ impl WisprFlowGui {
                     writing_style: "default".to_string(),
                     language_code: self.settings_language.clone(),
                     auto_paste: self.settings_auto_paste,
+                    auto_start: self.settings_auto_start,
                     auth_token: if self.settings_token.is_empty() {
                         None
                     } else {
