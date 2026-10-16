@@ -6,7 +6,7 @@ use eframe::egui::{self, Color32, FontId, Pos2, Rect, Rounding, Sense, Stroke, V
 use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
-use crate::db::HistoryRecord;
+use crate::db::{DictionaryEntry, HistoryRecord};
 use crate::platform::{vk_to_string, ActiveAppContext, PlatformManager};
 use crate::stt::SttProvider;
 use crate::ui::DictationStatus;
@@ -15,6 +15,7 @@ use crate::ui::DictationStatus;
 pub enum ActiveTab {
     Studio,
     History,
+    Dictionary,
     Settings,
 }
 
@@ -25,6 +26,9 @@ pub enum GuiEvent {
     RefreshHistory,
     SaveConfig(AppConfig),
     DeleteHistory(String),
+    AddDictionaryEntry { word: String, replacement: Option<String> },
+    DeleteDictionaryEntry(String),
+    RefreshDictionary,
 }
 
 /// Shared state between the async dictation engine and the GUI
@@ -38,6 +42,7 @@ pub struct AppState {
     pub active_app: Arc<Mutex<ActiveAppContext>>,
     pub config: Arc<Mutex<AppConfig>>,
     pub history: Arc<Mutex<Vec<HistoryRecord>>>,
+    pub dictionary_entries: Arc<Mutex<Vec<DictionaryEntry>>>,
     pub toast: Arc<Mutex<Option<(String, Instant)>>>,
     pub window_visible: Arc<AtomicBool>,
     #[allow(dead_code)]
@@ -48,7 +53,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config: AppConfig, initial_history: Vec<HistoryRecord>) -> Self {
+    pub fn new(config: AppConfig, initial_history: Vec<HistoryRecord>, initial_dict: Vec<DictionaryEntry>) -> Self {
         Self {
             is_recording: Arc::new(AtomicBool::new(false)),
             current_amplitude: Arc::new(Mutex::new(0.0)),
@@ -58,6 +63,7 @@ impl AppState {
             active_app: Arc::new(Mutex::new(ActiveAppContext::default())),
             config: Arc::new(Mutex::new(config)),
             history: Arc::new(Mutex::new(initial_history)),
+            dictionary_entries: Arc::new(Mutex::new(initial_dict)),
             toast: Arc::new(Mutex::new(None)),
             window_visible: Arc::new(AtomicBool::new(true)),
             pending_toggle_window: Arc::new(AtomicBool::new(false)),
@@ -94,6 +100,17 @@ pub struct WisprFlowGui {
     settings_elevenlabs_api_key: String,
     settings_elevenlabs_model: String,
     settings_show_floating_hud: bool,
+    // Features 1, 2, 3, 5: AI Formatting, Writing Style, Sound Effects, Mic, Trigger Mode
+    settings_ai_formatting: bool,
+    settings_writing_style: String,
+    settings_sound_effects: bool,
+    settings_input_device_name: Option<String>,
+    settings_recording_trigger_mode: String,
+    available_devices: Vec<String>,
+    // Feature 6: Dictionary & Snippets UI inputs
+    dict_word_input: String,
+    dict_replacement_input: String,
+    dict_search_query: String,
     // Live animations & metrics
     animation_time: f32,
     recording_start: Option<Instant>,
@@ -156,6 +173,11 @@ impl WisprFlowGui {
             elevenlabs_key,
             elevenlabs_model,
             show_hud,
+            ai_formatting,
+            writing_style,
+            sound_effects,
+            input_device,
+            trigger_mode,
         ) = {
             let cfg = state.config.lock().unwrap();
             (
@@ -172,6 +194,11 @@ impl WisprFlowGui {
                 cfg.elevenlabs_api_key.clone().unwrap_or_default(),
                 cfg.elevenlabs_model.clone(),
                 cfg.show_floating_hud,
+                cfg.ai_formatting,
+                cfg.writing_style.clone(),
+                cfg.sound_effects,
+                cfg.input_device_name.clone(),
+                cfg.recording_trigger_mode.clone(),
             )
         };
 
@@ -194,6 +221,15 @@ impl WisprFlowGui {
             settings_elevenlabs_api_key: elevenlabs_key,
             settings_elevenlabs_model: elevenlabs_model,
             settings_show_floating_hud: show_hud,
+            settings_ai_formatting: ai_formatting,
+            settings_writing_style: writing_style,
+            settings_sound_effects: sound_effects,
+            settings_input_device_name: input_device,
+            settings_recording_trigger_mode: trigger_mode,
+            available_devices: crate::audio::list_input_devices(),
+            dict_word_input: String::new(),
+            dict_replacement_input: String::new(),
+            dict_search_query: String::new(),
             animation_time: 0.0,
             recording_start: None,
             fonts_initialized: false,
@@ -470,6 +506,7 @@ impl eframe::App for WisprFlowGui {
             match self.active_tab {
                 ActiveTab::Studio => self.render_studio_tab(ui, is_rec, amplitude, status, &dictate_key_name),
                 ActiveTab::History => self.render_history_tab(ui),
+                ActiveTab::Dictionary => self.render_dictionary_tab(ui),
                 ActiveTab::Settings => self.render_settings_tab(ui),
             }
 
@@ -666,6 +703,7 @@ impl WisprFlowGui {
 
     fn render_tab_nav(&mut self, ui: &mut egui::Ui) {
         let history_count = self.state.history.lock().unwrap().len();
+        let dict_count = self.state.dictionary_entries.lock().unwrap().len();
 
         egui::Frame::none()
             .fill(Color32::from_rgb(15, 20, 32))
@@ -676,7 +714,8 @@ impl WisprFlowGui {
                 ui.horizontal(|ui| {
                     let tabs = [
                         (ActiveTab::Studio, "🎙️ Live Studio".to_string()),
-                        (ActiveTab::History, format!("📜 Dictation History ({})", history_count)),
+                        (ActiveTab::History, format!("📜 History ({})", history_count)),
+                        (ActiveTab::Dictionary, format!("📖 Dictionary & Snippets ({})", dict_count)),
                         (ActiveTab::Settings, "⚙️ Settings & Audio".to_string()),
                     ];
 
@@ -684,19 +723,21 @@ impl WisprFlowGui {
                         let is_active = self.active_tab == tab;
                         let btn = egui::Button::new(
                             egui::RichText::new(label)
-                                .font(FontId::proportional(13.0))
+                                .font(FontId::proportional(12.5))
                                 .color(if is_active { Color32::WHITE } else { Color32::from_rgb(148, 163, 184) })
                                 .strong(),
                         )
                         .fill(if is_active { Color32::from_rgb(79, 70, 229) } else { Color32::TRANSPARENT })
                         .stroke(if is_active { Stroke::new(1.0_f32, Color32::from_rgb(129, 140, 248)) } else { Stroke::NONE })
                         .rounding(Rounding::same(7.0))
-                        .min_size(Vec2::new(165.0, 32.0));
+                        .min_size(Vec2::new(150.0, 32.0));
 
                         if ui.add(btn).clicked() {
                             self.active_tab = tab;
                             if tab == ActiveTab::History {
                                 let _ = self.event_tx.send(GuiEvent::RefreshHistory);
+                            } else if tab == ActiveTab::Dictionary {
+                                let _ = self.event_tx.send(GuiEvent::RefreshDictionary);
                             }
                         }
                     }
@@ -820,7 +861,12 @@ impl WisprFlowGui {
                         ui.add_space(14.0);
 
                         // Hero Action Button
-                        let dictate_btn_text = format!("🎙️  START DICTATING (OR HOLD {})", dictate_key_name);
+                        let is_tap = self.settings_recording_trigger_mode == "tap_to_toggle";
+                        let dictate_btn_text = if is_tap {
+                            format!("🎙️  START DICTATING (OR TAP {})", dictate_key_name)
+                        } else {
+                            format!("🎙️  START DICTATING (OR HOLD {})", dictate_key_name)
+                        };
                         let (btn_text, btn_bg, btn_stroke) = if is_rec {
                             ("⏹️  CLICK TO COMMIT & INSERT", Color32::from_rgb(220, 38, 38), Color32::from_rgb(248, 113, 113))
                         } else if status == DictationStatus::Transcribing {
@@ -849,7 +895,11 @@ impl WisprFlowGui {
                         }
 
                         ui.add_space(8.0);
-                        let tip_text = format!("💡 Hold {} anywhere across Windows to dictate directly into any active text box.", dictate_key_name);
+                        let tip_text = if is_tap {
+                            format!("💡 Tap {} once to start dictating hands-free, tap again to commit and insert text.", dictate_key_name)
+                        } else {
+                            format!("💡 Hold {} anywhere across Windows to dictate directly into any active text box.", dictate_key_name)
+                        };
                         ui.label(
                             egui::RichText::new(tip_text)
                                 .font(FontId::proportional(11.0))
@@ -1294,6 +1344,223 @@ impl WisprFlowGui {
         }
     }
 
+    fn render_dictionary_tab(&mut self, ui: &mut egui::Ui) {
+        let entries = self.state.dictionary_entries.lock().unwrap().clone();
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // CARD 1: Introduction & Add New Entry Form
+            egui::Frame::none()
+                .fill(Color32::from_rgb(17, 23, 36))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
+                .rounding(Rounding::same(12.0))
+                .inner_margin(egui::Margin::same(16.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("📖  CUSTOM VOCABULARY & TEXT SNIPPET EXPANSIONS")
+                            .font(FontId::proportional(12.5))
+                            .color(Color32::from_rgb(148, 163, 184))
+                            .strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Teach Wflow custom terminology, names, or define instant trigger snippets. When you speak a trigger phrase, it will automatically be expanded into your configured replacement text.")
+                            .font(FontId::proportional(11.0))
+                            .color(Color32::from_rgb(148, 163, 184)),
+                    );
+                    ui.add_space(12.0);
+
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label("Word or Trigger Phrase:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.dict_word_input)
+                                    .hint_text("e.g. Wflow, myemail, BRB, หมอพร้อม")
+                                    .desired_width(240.0),
+                            );
+                        });
+
+                        ui.add_space(8.0);
+
+                        ui.vertical(|ui| {
+                            ui.label("Snippet Replacement (Optional):");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.dict_replacement_input)
+                                    .hint_text("e.g. contact@wflow.ai (leave blank for vocabulary only)")
+                                    .desired_width(300.0),
+                            );
+                        });
+
+                        ui.add_space(8.0);
+
+                        ui.vertical(|ui| {
+                            ui.label(" ");
+                            let add_btn = egui::Button::new(
+                                egui::RichText::new("➕ Add Entry")
+                                    .font(FontId::proportional(12.5))
+                                    .color(Color32::WHITE)
+                                    .strong(),
+                            )
+                            .fill(Color32::from_rgb(79, 70, 229))
+                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(129, 140, 248)))
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(110.0, 28.0));
+
+                            if ui.add(add_btn).clicked() {
+                                let word = self.dict_word_input.trim().to_string();
+                                if !word.is_empty() {
+                                    let repl = if self.dict_replacement_input.trim().is_empty() {
+                                        None
+                                    } else {
+                                        Some(self.dict_replacement_input.trim().to_string())
+                                    };
+                                    let _ = self.event_tx.send(GuiEvent::AddDictionaryEntry {
+                                        word: word.clone(),
+                                        replacement: repl,
+                                    });
+                                    self.dict_word_input.clear();
+                                    self.dict_replacement_input.clear();
+                                    self.state.set_toast(&format!("Added '{}' to dictionary", word));
+                                }
+                            }
+                        });
+                    });
+                });
+
+            ui.add_space(10.0);
+
+            // Filter & Entries List
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("All Entries ({})", entries.len()))
+                        .font(FontId::proportional(13.0))
+                        .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.dict_search_query)
+                            .hint_text("🔍 Filter dictionary...")
+                            .desired_width(200.0),
+                    );
+                });
+            });
+
+            ui.add_space(8.0);
+
+            let filter = self.dict_search_query.trim().to_lowercase();
+            let filtered_entries: Vec<_> = entries
+                .iter()
+                .filter(|e| {
+                    if filter.is_empty() {
+                        true
+                    } else {
+                        e.word.to_lowercase().contains(&filter)
+                            || e.replacement
+                                .as_ref()
+                                .map(|r| r.to_lowercase().contains(&filter))
+                                .unwrap_or(false)
+                    }
+                })
+                .collect();
+
+            if filtered_entries.is_empty() {
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(15, 20, 32))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(26, 33, 50)))
+                    .rounding(Rounding::same(8.0))
+                    .inner_margin(egui::Margin::same(24.0))
+                    .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new("No dictionary entries found.")
+                                    .font(FontId::proportional(13.0))
+                                    .color(Color32::from_rgb(148, 163, 184)),
+                            );
+                            ui.label(
+                                egui::RichText::new("Add custom words or text expansion snippets above!")
+                                    .font(FontId::proportional(11.0))
+                                    .color(Color32::from_rgb(100, 116, 139)),
+                            );
+                        });
+                    });
+            } else {
+                for entry in filtered_entries {
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(17, 23, 36))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(30, 41, 64)))
+                        .rounding(Rounding::same(8.0))
+                        .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let is_snippet = entry.replacement.as_ref().map(|r| !r.trim().is_empty()).unwrap_or(false);
+                                if is_snippet {
+                                    let badge = ui.label(
+                                        egui::RichText::new("⚡ SNIPPET")
+                                            .font(FontId::monospace(10.5))
+                                            .color(Color32::from_rgb(192, 132, 252))
+                                            .strong(),
+                                    );
+                                    ui.painter().rect_filled(
+                                        badge.rect.expand(2.5),
+                                        Rounding::same(4.0),
+                                        Color32::from_rgba_unmultiplied(168, 85, 247, 30),
+                                    );
+                                } else {
+                                    let badge = ui.label(
+                                        egui::RichText::new("📚 VOCAB")
+                                            .font(FontId::monospace(10.5))
+                                            .color(Color32::from_rgb(56, 189, 248))
+                                            .strong(),
+                                    );
+                                    ui.painter().rect_filled(
+                                        badge.rect.expand(2.5),
+                                        Rounding::same(4.0),
+                                        Color32::from_rgba_unmultiplied(14, 165, 233, 30),
+                                    );
+                                }
+
+                                ui.add_space(6.0);
+
+                                ui.label(
+                                    egui::RichText::new(&entry.word)
+                                        .font(FontId::proportional(14.0))
+                                        .color(Color32::WHITE)
+                                        .strong(),
+                                );
+
+                                if let Some(ref repl) = entry.replacement {
+                                    if !repl.trim().is_empty() {
+                                        ui.label(
+                                            egui::RichText::new("➔")
+                                                .font(FontId::proportional(12.0))
+                                                .color(Color32::from_rgb(148, 163, 184)),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(repl)
+                                                .font(FontId::proportional(13.5))
+                                                .color(Color32::from_rgb(203, 213, 225)),
+                                        );
+                                    }
+                                }
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let del_btn = egui::Button::new("🗑️ Delete")
+                                        .fill(Color32::from_rgb(45, 25, 30))
+                                        .rounding(Rounding::same(4.0));
+                                    if ui.add(del_btn).clicked() {
+                                        let _ = self.event_tx.send(GuiEvent::DeleteDictionaryEntry(entry.id.clone()));
+                                        self.state.set_toast("Entry removed");
+                                    }
+                                });
+                            });
+                        });
+                    ui.add_space(4.0);
+                }
+            }
+
+            ui.add_space(14.0);
+        });
+    }
+
     fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             // CARD 1: Hotkeys & Trigger Preferences
@@ -1463,6 +1730,57 @@ impl WisprFlowGui {
                         });
                     });
 
+                    ui.add_space(8.0);
+
+                    // Dictation Trigger Mode (Push-to-Talk vs Tap-to-Toggle)
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("🎙️ Dictation Trigger Mode:")
+                                    .font(FontId::proportional(13.0))
+                                    .strong(),
+                            );
+                            let mode_label = if self.settings_recording_trigger_mode == "tap_to_toggle" {
+                                "Tap to Toggle (Hands-Free)"
+                            } else {
+                                "Push-to-Talk (Hold Key)"
+                            };
+                            let badge = ui.label(
+                                egui::RichText::new(format!(" {} ", mode_label))
+                                    .font(FontId::monospace(11.5))
+                                    .color(Color32::from_rgb(165, 180, 252))
+                                    .strong(),
+                            );
+                            ui.painter().rect_filled(
+                                badge.rect.expand(2.0),
+                                Rounding::same(4.0),
+                                Color32::from_rgba_unmultiplied(99, 102, 241, 40),
+                            );
+                        });
+                        ui.add_space(3.0);
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(
+                                &mut self.settings_recording_trigger_mode,
+                                "push_to_talk".to_string(),
+                                "🖐️ Hold key to talk (Push-to-Talk)",
+                            );
+                            ui.selectable_value(
+                                &mut self.settings_recording_trigger_mode,
+                                "tap_to_toggle".to_string(),
+                                "🔄 Tap once to start / tap to stop (Hands-Free)",
+                            );
+                        });
+                        ui.label(
+                            egui::RichText::new(if self.settings_recording_trigger_mode == "tap_to_toggle" {
+                                "Tap your hotkey once to start dictating freely. Tap again to stop and automatically paste into your active window."
+                            } else {
+                                "Hold down your hotkey while speaking. Releasing the key immediately commits and types the text."
+                            })
+                            .font(FontId::proportional(11.0))
+                            .color(Color32::from_rgb(148, 163, 184)),
+                        );
+                    });
+
                     ui.add_space(10.0);
 
                     // Auto Paste Checkbox
@@ -1496,6 +1814,151 @@ impl WisprFlowGui {
                             .font(FontId::proportional(11.0))
                             .color(Color32::from_rgb(148, 163, 184)),
                     );
+                });
+
+            ui.add_space(10.0);
+
+            // CARD 1.5: Microphone & Sound Effects Hardware
+            egui::Frame::none()
+                .fill(Color32::from_rgb(17, 23, 36))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
+                .rounding(Rounding::same(12.0))
+                .inner_margin(egui::Margin::same(16.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("🎤  MICROPHONE HARDWARE & AUDIO SOUND EFFECTS")
+                            .font(FontId::proportional(12.5))
+                            .color(Color32::from_rgb(148, 163, 184))
+                            .strong(),
+                    );
+                    ui.add_space(10.0);
+
+                    // Microphone Device Selector
+                    ui.horizontal(|ui| {
+                        ui.label("Input Microphone:");
+                        let current_dev_label = self
+                            .settings_input_device_name
+                            .as_deref()
+                            .unwrap_or("Default System Microphone");
+
+                        egui::ComboBox::from_id_salt("mic_device_combo")
+                            .selected_text(current_dev_label)
+                            .width(340.0)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(self.settings_input_device_name.is_none(), "Default System Microphone").clicked() {
+                                    self.settings_input_device_name = None;
+                                }
+                                for dev in &self.available_devices {
+                                    let is_sel = self.settings_input_device_name.as_deref() == Some(dev.as_str());
+                                    if ui.selectable_label(is_sel, dev).clicked() {
+                                        self.settings_input_device_name = Some(dev.clone());
+                                    }
+                                }
+                            });
+
+                        if ui.button("🔄 Refresh Devices").clicked() {
+                            self.available_devices = crate::audio::list_input_devices();
+                            self.state.set_toast("Audio input devices refreshed");
+                        }
+                    });
+
+                    ui.add_space(10.0);
+
+                    // Sound Effects toggle & Test chime button
+                    ui.horizontal(|ui| {
+                        let se_cb = ui.checkbox(
+                            &mut self.settings_sound_effects,
+                            "Enable Synthesized Audio Earcons (Start/Finish/Error sound effects)",
+                        );
+                        if se_cb.changed() {
+                            crate::sound::set_sound_enabled(self.settings_sound_effects);
+                        }
+
+                        ui.add_space(8.0);
+                        let test_sound_btn = egui::Button::new("🔊 Test Chime")
+                            .fill(Color32::from_rgb(45, 58, 86))
+                            .rounding(Rounding::same(6.0));
+                        if ui.add(test_sound_btn).clicked() {
+                            crate::sound::play_sound(crate::sound::SoundEffect::StartRecording);
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new("  └ Soft pure-Rust synthesized harmonic chimes provide immediate tactile feedback when dictation starts and finishes.")
+                            .font(FontId::proportional(11.0))
+                            .color(Color32::from_rgb(148, 163, 184)),
+                    );
+                });
+
+            ui.add_space(10.0);
+
+            // CARD 1.8: AI Post-Processing & Smart Formatting
+            egui::Frame::none()
+                .fill(Color32::from_rgb(17, 23, 36))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
+                .rounding(Rounding::same(12.0))
+                .inner_margin(egui::Margin::same(16.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("✨  AI POST-PROCESSING & SMART FORMATTING")
+                            .font(FontId::proportional(12.5))
+                            .color(Color32::from_rgb(148, 163, 184))
+                            .strong(),
+                    );
+                    ui.add_space(10.0);
+
+                    ui.checkbox(
+                        &mut self.settings_ai_formatting,
+                        "Enable Instant AI Text Formatting & Cleanup (Groq Llama 3.1 8B ~150ms)",
+                    );
+                    ui.label(
+                        egui::RichText::new("  └ Automatically cleans speech disfluencies, filler words (um, uh, อ่า, แบบว่า), fixes punctuation, and adapts writing tone.")
+                            .font(FontId::proportional(11.0))
+                            .color(Color32::from_rgb(148, 163, 184)),
+                    );
+
+                    if self.settings_ai_formatting {
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Writing Style Tone:");
+                            let style_label = match self.settings_writing_style.as_str() {
+                                "smart_cleanup" => "Smart Cleanup (Removes stutters, filler words, fixes punctuation)",
+                                "casual" => "Casual & Friendly (Chat and messaging tone)",
+                                "professional" => "Professional & Executive (Polite corporate emails & reports)",
+                                "code" => "Code & CLI Commands (Converts speech to code / terminal syntax)",
+                                "bullet_points" => "Bullet Points (Summary in structured markdown bullets)",
+                                other => other,
+                            };
+                            egui::ComboBox::from_id_salt("writing_style_combo")
+                                .selected_text(style_label)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.settings_writing_style,
+                                        "smart_cleanup".to_string(),
+                                        "Smart Cleanup (Removes stutters, filler words, fixes punctuation) [Recommended]",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.settings_writing_style,
+                                        "casual".to_string(),
+                                        "Casual & Friendly (Chat and messaging tone)",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.settings_writing_style,
+                                        "professional".to_string(),
+                                        "Professional & Executive (Polite corporate emails & reports)",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.settings_writing_style,
+                                        "code".to_string(),
+                                        "Code & CLI Commands (Converts speech to code / terminal syntax)",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.settings_writing_style,
+                                        "bullet_points".to_string(),
+                                        "Bullet Points (Summary in structured markdown bullets)",
+                                    );
+                                });
+                        });
+                    }
                 });
 
             ui.add_space(10.0);
@@ -1736,7 +2199,11 @@ impl WisprFlowGui {
                     },
                     elevenlabs_model: self.settings_elevenlabs_model.clone(),
                     show_floating_hud: self.settings_show_floating_hud,
-                    writing_style: "default".to_string(),
+                    ai_formatting: self.settings_ai_formatting,
+                    writing_style: self.settings_writing_style.clone(),
+                    sound_effects: self.settings_sound_effects,
+                    input_device_name: self.settings_input_device_name.clone(),
+                    recording_trigger_mode: self.settings_recording_trigger_mode.clone(),
                     language_code: self.settings_language.clone(),
                     auto_paste: self.settings_auto_paste,
                     auto_start: self.settings_auto_start,
@@ -1746,6 +2213,8 @@ impl WisprFlowGui {
                         Some(self.settings_token.clone())
                     },
                 };
+
+                crate::sound::set_sound_enabled(new_config.sound_effects);
 
                 if let Ok(mut lock) = self.state.config.lock() {
                     *lock = new_config.clone();

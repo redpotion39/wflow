@@ -191,4 +191,73 @@ impl Database {
         }
         Ok(words)
     }
+
+    /// Fetches all personal dictionary entries (words and snippets)
+    pub fn get_all_dictionary_entries(&self) -> Result<Vec<DictionaryEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id, word, replacement FROM Dictionary ORDER BY createdAt DESC")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(DictionaryEntry {
+                id: row.get(0)?,
+                word: row.get(1)?,
+                replacement: row.get(2)?,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            if let Ok(entry) = r {
+                list.push(entry);
+            }
+        }
+        Ok(list)
+    }
+
+    /// Adds or replaces a dictionary vocabulary or snippet
+    pub fn add_dictionary_entry(&self, word: &str, replacement: Option<&str>) -> Result<()> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO Dictionary (id, word, replacement, isStarred, createdAt, updatedAt) VALUES (?1, ?2, ?3, 0, ?4, ?4)",
+            params![id, word.trim(), replacement.map(|s| s.trim()), now],
+        )?;
+        info!("Added dictionary entry: '{}' -> {:?}", word, replacement);
+        Ok(())
+    }
+
+    /// Deletes a dictionary entry by id
+    pub fn delete_dictionary_entry(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM Dictionary WHERE id = ?1", params![id])?;
+        info!("Deleted dictionary entry {}", id);
+        Ok(())
+    }
+
+    /// Fetches all active text snippets (trigger -> replacement)
+    pub fn get_snippets(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT word, replacement FROM Dictionary WHERE replacement IS NOT NULL AND TRIM(replacement) != ''")?;
+        let rows = stmt.query_map([], |row| {
+            let word: String = row.get(0)?;
+            let repl: String = row.get(1)?;
+            Ok((word, repl))
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            if let Ok(pair) = r {
+                list.push(pair);
+            }
+        }
+        Ok(list)
+    }
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DictionaryEntry {
+    pub id: String,
+    pub word: String,
+    pub replacement: Option<String>,
+}
+

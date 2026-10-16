@@ -7,6 +7,7 @@ mod grpc;
 mod gui;
 mod platform;
 mod proto;
+mod sound;
 mod stt;
 mod ui;
 
@@ -40,11 +41,13 @@ fn main() -> Result<()> {
 
     // 2. Load configuration & database
     let config = AppConfig::load_or_default(None);
+    sound::set_sound_enabled(config.sound_effects);
     let db = Arc::new(Database::open_or_default(None)?);
     let initial_history = db.get_recent_history(50).unwrap_or_default();
+    let initial_dict = db.get_all_dictionary_entries().unwrap_or_default();
 
     // 3. Create shared thread-safe AppState
-    let app_state = AppState::new(config.clone(), initial_history);
+    let app_state = AppState::new(config.clone(), initial_history, initial_dict);
     let app_state_worker = app_state.clone();
     let app_state_gui = app_state.clone();
 
@@ -142,38 +145,68 @@ async fn run_background_coordinator(
     let mut session_response_handle: Option<tokio::task::JoinHandle<Option<String>>> = None;
     let session_audio_samples = Arc::new(Mutex::new(Vec::<i16>::new()));
 
-    let dictionary_words = db.get_dictionary_words().unwrap_or_default();
-
     loop {
         tokio::select! {
             // Hotkey events (from global keyboard hook)
             event = hotkey_rx.recv() => {
                 match event {
                     Some(HotkeyEvent::Pressed) => {
-                        start_dictation_session(
-                            &state,
-                            &mut recorder,
-                            &is_dictating,
-                            &mut session_start,
-                            &mut session_ctx,
-                            &mut session_request_tx,
-                            &mut session_response_handle,
-                            &session_audio_samples,
-                            &dictionary_words,
-                        ).await;
+                        let mode = state.config.lock().map(|c| c.recording_trigger_mode.clone()).unwrap_or_else(|_| "push_to_talk".to_string());
+                        if mode == "tap_to_toggle" {
+                            if is_dictating.load(Ordering::SeqCst) {
+                                finish_dictation_session(
+                                    &state,
+                                    &db,
+                                    &mut recorder,
+                                    &is_dictating,
+                                    &mut session_start,
+                                    &mut session_ctx,
+                                    &mut session_request_tx,
+                                    &mut session_response_handle,
+                                    &session_audio_samples,
+                                ).await;
+                            } else {
+                                start_dictation_session(
+                                    &state,
+                                    &db,
+                                    &mut recorder,
+                                    &is_dictating,
+                                    &mut session_start,
+                                    &mut session_ctx,
+                                    &mut session_request_tx,
+                                    &mut session_response_handle,
+                                    &session_audio_samples,
+                                ).await;
+                            }
+                        } else {
+                            start_dictation_session(
+                                &state,
+                                &db,
+                                &mut recorder,
+                                &is_dictating,
+                                &mut session_start,
+                                &mut session_ctx,
+                                &mut session_request_tx,
+                                &mut session_response_handle,
+                                &session_audio_samples,
+                            ).await;
+                        }
                     }
                     Some(HotkeyEvent::Released) => {
-                        finish_dictation_session(
-                            &state,
-                            &db,
-                            &mut recorder,
-                            &is_dictating,
-                            &mut session_start,
-                            &mut session_ctx,
-                            &mut session_request_tx,
-                            &mut session_response_handle,
-                            &session_audio_samples,
-                        ).await;
+                        let mode = state.config.lock().map(|c| c.recording_trigger_mode.clone()).unwrap_or_else(|_| "push_to_talk".to_string());
+                        if mode != "tap_to_toggle" {
+                            finish_dictation_session(
+                                &state,
+                                &db,
+                                &mut recorder,
+                                &is_dictating,
+                                &mut session_start,
+                                &mut session_ctx,
+                                &mut session_request_tx,
+                                &mut session_response_handle,
+                                &session_audio_samples,
+                            ).await;
+                        }
                     }
                     Some(HotkeyEvent::ToggleWindow) => {
                         info!("Received ToggleWindow event from Hotkey or Tray Icon.");
@@ -229,6 +262,7 @@ async fn run_background_coordinator(
                     Some(GuiEvent::StartDictation) => {
                         start_dictation_session(
                             &state,
+                            &db,
                             &mut recorder,
                             &is_dictating,
                             &mut session_start,
@@ -236,7 +270,6 @@ async fn run_background_coordinator(
                             &mut session_request_tx,
                             &mut session_response_handle,
                             &session_audio_samples,
-                            &dictionary_words,
                         ).await;
                     }
                     Some(GuiEvent::StopDictation) => {
@@ -264,6 +297,29 @@ async fn run_background_coordinator(
                         if let Ok(records) = db.get_recent_history(50) {
                             if let Ok(mut lock) = state.history.lock() {
                                 *lock = records;
+                            }
+                        }
+                    }
+                    Some(GuiEvent::AddDictionaryEntry { word, replacement }) => {
+                        let _ = db.add_dictionary_entry(&word, replacement.as_deref());
+                        if let Ok(entries) = db.get_all_dictionary_entries() {
+                            if let Ok(mut lock) = state.dictionary_entries.lock() {
+                                *lock = entries;
+                            }
+                        }
+                    }
+                    Some(GuiEvent::DeleteDictionaryEntry(id)) => {
+                        let _ = db.delete_dictionary_entry(&id);
+                        if let Ok(entries) = db.get_all_dictionary_entries() {
+                            if let Ok(mut lock) = state.dictionary_entries.lock() {
+                                *lock = entries;
+                            }
+                        }
+                    }
+                    Some(GuiEvent::RefreshDictionary) => {
+                        if let Ok(entries) = db.get_all_dictionary_entries() {
+                            if let Ok(mut lock) = state.dictionary_entries.lock() {
+                                *lock = entries;
                             }
                         }
                     }
@@ -295,6 +351,7 @@ async fn run_background_coordinator(
 
 async fn start_dictation_session(
     state: &AppState,
+    db: &Arc<Database>,
     recorder: &mut AudioRecorder,
     is_dictating: &Arc<AtomicBool>,
     session_start: &mut Option<Instant>,
@@ -302,7 +359,6 @@ async fn start_dictation_session(
     session_request_tx: &mut Option<mpsc::Sender<Request>>,
     session_response_handle: &mut Option<tokio::task::JoinHandle<Option<String>>>,
     session_audio_samples: &Arc<Mutex<Vec<i16>>>,
-    dictionary_words: &[String],
 ) {
     if is_dictating.load(Ordering::SeqCst) {
         return;
@@ -320,7 +376,7 @@ async fn start_dictation_session(
         *lock = DictationStatus::Listening;
     }
 
-    let (endpoint_url, user_id, language_code, _style, auth_token, stt_provider, show_floating_hud) = {
+    let (endpoint_url, user_id, language_code, _style, auth_token, stt_provider, show_floating_hud, sound_effects, input_device) = {
         let cfg = state.config.lock().unwrap();
         (
             cfg.endpoint_url.clone(),
@@ -330,8 +386,13 @@ async fn start_dictation_session(
             cfg.auth_token.clone(),
             cfg.stt_provider,
             cfg.show_floating_hud,
+            cfg.sound_effects,
+            cfg.input_device_name.clone(),
         )
     };
+
+    sound::set_sound_enabled(sound_effects);
+    sound::play_sound(sound::SoundEffect::StartRecording);
 
     // Show floating HUD overlay pill & waveform if enabled
     if show_floating_hud {
@@ -354,10 +415,13 @@ async fn start_dictation_session(
     }
     *session_ctx = Some(app_ctx.clone());
 
+    let dictionary_words = db.get_dictionary_words().unwrap_or_default();
+
     // Audio stream channel from cpal
     let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(100);
-    if let Err(e) = recorder.start_recording(audio_tx) {
+    if let Err(e) = recorder.start_recording(audio_tx, input_device.as_deref()) {
         error!("Microphone start failed: {}", e);
+        sound::play_sound(sound::SoundEffect::Error);
         if let Ok(mut lock) = state.status.lock() {
             *lock = DictationStatus::Error;
         }
@@ -640,12 +704,14 @@ async fn finish_dictation_session(
                                     }
                                     Err(err) => {
                                         error!("Groq STT transcription failed: {}", err);
+                                        sound::play_sound(sound::SoundEffect::Error);
                                         state.set_toast(&format!("Groq Error: {}", err));
                                     }
                                 }
                             }
                             Err(err) => {
                                 error!("Failed to create WAV byte stream: {}", err);
+                                sound::play_sound(sound::SoundEffect::Error);
                             }
                         }
                     } else {
@@ -654,6 +720,7 @@ async fn finish_dictation_session(
                 }
                 _ => {
                     warn!("Groq API key is not configured.");
+                    sound::play_sound(sound::SoundEffect::Error);
                     state.set_toast("Groq API key is missing. Set it in Settings tab.");
                 }
             }
@@ -673,12 +740,14 @@ async fn finish_dictation_session(
                                     }
                                     Err(err) => {
                                         error!("ElevenLabs STT transcription failed: {}", err);
+                                        sound::play_sound(sound::SoundEffect::Error);
                                         state.set_toast(&format!("ElevenLabs Error: {}", err));
                                     }
                                 }
                             }
                             Err(err) => {
                                 error!("Failed to create WAV byte stream: {}", err);
+                                sound::play_sound(sound::SoundEffect::Error);
                             }
                         }
                     } else {
@@ -687,6 +756,7 @@ async fn finish_dictation_session(
                 }
                 _ => {
                     warn!("ElevenLabs API key is not configured.");
+                    sound::play_sound(sound::SoundEffect::Error);
                     state.set_toast("ElevenLabs API key is missing. Set it in Settings tab.");
                 }
             }
@@ -722,8 +792,45 @@ async fn finish_dictation_session(
         return;
     }
 
+    // 1. Apply Custom Text Snippets (Trigger Phrase -> Replacement Expansion)
+    let mut final_text = transcribed_text.clone();
+    if let Ok(snippets) = db.get_snippets() {
+        for (trigger, replacement) in snippets {
+            if !trigger.trim().is_empty() && !replacement.trim().is_empty() {
+                final_text = replace_case_insensitive(&final_text, &trigger, &replacement);
+            }
+        }
+    }
+
+    // 2. Apply AI Post-Processing & Smart Formatting with Groq Llama 3.1 8B (~150ms)
+    let (ai_formatting, writing_style, groq_key) = {
+        let cfg = state.config.lock().unwrap();
+        (cfg.ai_formatting, cfg.writing_style.clone(), cfg.groq_api_key.clone())
+    };
+
+    if ai_formatting && !final_text.is_empty() {
+        if let Some(ref key) = groq_key {
+            if !key.trim().is_empty() {
+                info!("AI post-processing with Groq Llama 3.1 8B (style: {})", writing_style);
+                match stt::post_process_with_llm(key, &final_text, &writing_style).await {
+                    Ok(cleaned) => {
+                        if !cleaned.trim().is_empty() {
+                            final_text = cleaned;
+                        }
+                    }
+                    Err(err) => {
+                        warn!("LLM post-processing error: {}", err);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Play pleasant completion earcon chime
+    sound::play_sound(sound::SoundEffect::FinishRecording);
+
     if let Ok(mut lock) = state.last_transcript.lock() {
-        *lock = transcribed_text.clone();
+        *lock = final_text.clone();
     }
     if let Ok(mut lock) = state.last_latency.lock() {
         *lock = latency;
@@ -736,7 +843,7 @@ async fn finish_dictation_session(
 
     // Auto paste if enabled
     if auto_paste {
-        if let Err(e) = PlatformManager::paste_text(&transcribed_text) {
+        if let Err(e) = PlatformManager::paste_text(&final_text) {
             error!("Failed to paste text: {}", e);
         }
     }
@@ -744,8 +851,8 @@ async fn finish_dictation_session(
     // Save to SQLite
     let history_entry = HistoryRecord {
         transcript_id: uuid::Uuid::new_v4().to_string(),
-        asr_text: transcribed_text.clone(),
-        formatted_text: transcribed_text.clone(),
+        asr_text: transcribed_text,
+        formatted_text: final_text.clone(),
         app: session_ctx.as_ref().map(|c| c.process_name.clone()).unwrap_or_default(),
         textbox_contents: session_ctx.as_ref().and_then(|c| c.before_text.clone()),
         duration_secs: duration,
@@ -776,4 +883,61 @@ async fn finish_dictation_session(
         }
         PlatformManager::hide_floating_hud();
     });
+}
+
+/// Case-insensitive substring replacement that respects UTF-8 character boundaries
+fn replace_case_insensitive(text: &str, find: &str, replace_with: &str) -> String {
+    if find.is_empty() || text.is_empty() {
+        return text.to_string();
+    }
+    let lower_find: Vec<char> = find.to_lowercase().chars().collect();
+    let chars: Vec<char> = text.chars().collect();
+    let lower_chars: Vec<char> = text.to_lowercase().chars().collect();
+
+    if chars.len() != lower_chars.len() {
+        return text.replace(find, replace_with);
+    }
+
+    let mut result = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if i + lower_find.len() <= lower_chars.len()
+            && lower_chars[i..i + lower_find.len()] == lower_find[..]
+        {
+            result.push_str(replace_with);
+            i += lower_find.len();
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_replace_case_insensitive_ascii() {
+        let input = "Hello BRB see you later";
+        let output = replace_case_insensitive(input, "brb", "be right back");
+        assert_eq!(output, "Hello be right back see you later");
+    }
+
+    #[test]
+    fn test_replace_case_insensitive_thai() {
+        let input = "สวัสดีครับทีมงานทุกท่าน";
+        let output = replace_case_insensitive(input, "ทีมงาน", "ทีมวิศวกร Wflow");
+        assert_eq!(output, "สวัสดีครับทีมวิศวกร Wflowทุกท่าน");
+    }
+
+    #[test]
+    fn test_sound_synthesis() {
+        sound::set_sound_enabled(true);
+        assert!(sound::is_sound_enabled());
+        sound::play_sound(sound::SoundEffect::StartRecording);
+        sound::play_sound(sound::SoundEffect::FinishRecording);
+        sound::play_sound(sound::SoundEffect::Error);
+    }
 }

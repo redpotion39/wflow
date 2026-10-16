@@ -5,5 +5,6 @@ pub mod grpc;
 pub mod gui;
 pub mod platform;
 pub mod proto;
+pub mod sound;
 pub mod stt;
 pub mod ui;

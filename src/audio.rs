@@ -14,6 +14,20 @@ pub struct AudioRecorder {
     current_amplitude: Arc<Mutex<f32>>,
 }
 
+/// Enumerates all available audio input devices on the system
+pub fn list_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    let mut names = Vec::new();
+    if let Ok(devices) = host.input_devices() {
+        for d in devices {
+            if let Ok(name) = d.name() {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
 impl AudioRecorder {
     pub fn new() -> Self {
         Self {
@@ -33,11 +47,24 @@ impl AudioRecorder {
     }
 
     /// Starts streaming 16kHz 16-bit PCM audio chunks over an async channel
-    pub fn start_recording(&mut self, tx: mpsc::Sender<Vec<u8>>) -> Result<()> {
+    pub fn start_recording(&mut self, tx: mpsc::Sender<Vec<u8>>, target_device_name: Option<&str>) -> Result<()> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .context("No default audio input device found")?;
+        let device = if let Some(target) = target_device_name {
+            let mut matched = None;
+            if let Ok(devices) = host.input_devices() {
+                for d in devices {
+                    if let Ok(name) = d.name() {
+                        if name == target {
+                            matched = Some(d);
+                            break;
+                        }
+                    }
+                }
+            }
+            matched.or_else(|| host.default_input_device())
+        } else {
+            host.default_input_device()
+        }.context("No audio input device found")?;
 
         let device_name = device.name().unwrap_or_else(|_| "Unknown Device".to_string());
         info!("Opening audio input device: {}", device_name);

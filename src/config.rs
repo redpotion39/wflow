@@ -23,7 +23,16 @@ pub struct AppConfig {
     pub elevenlabs_model: String,
     #[serde(default = "default_show_floating_hud")]
     pub show_floating_hud: bool,
+    #[serde(default = "default_ai_formatting")]
+    pub ai_formatting: bool,
+    #[serde(default = "default_writing_style")]
     pub writing_style: String,
+    #[serde(default = "default_sound_effects")]
+    pub sound_effects: bool,
+    #[serde(default)]
+    pub input_device_name: Option<String>,
+    #[serde(default = "default_recording_trigger_mode")]
+    pub recording_trigger_mode: String,
     pub language_code: String,
     pub auto_paste: bool,
     #[serde(default)]
@@ -48,6 +57,22 @@ fn default_show_floating_hud() -> bool {
     true
 }
 
+fn default_ai_formatting() -> bool {
+    true
+}
+
+fn default_writing_style() -> String {
+    "smart_cleanup".to_string()
+}
+
+fn default_sound_effects() -> bool {
+    true
+}
+
+fn default_recording_trigger_mode() -> String {
+    "push_to_talk".to_string()
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         let (token, uid) = Self::try_load_wispr_session().unwrap_or((None, uuid::Uuid::new_v4().to_string()));
@@ -62,7 +87,11 @@ impl Default for AppConfig {
             elevenlabs_api_key: None,
             elevenlabs_model: default_elevenlabs_model(),
             show_floating_hud: true,
-            writing_style: "default".to_string(),
+            ai_formatting: true,
+            writing_style: default_writing_style(),
+            sound_effects: true,
+            input_device_name: None,
+            recording_trigger_mode: default_recording_trigger_mode(),
             language_code: "auto".to_string(),
             auto_paste: true,
             auto_start: false,

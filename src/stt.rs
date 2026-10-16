@@ -178,3 +178,123 @@ pub async fn transcribe_elevenlabs(
     info!("ElevenLabs transcribed text: '{}'", parsed.text.trim());
     Ok(parsed.text.trim().to_string())
 }
+
+#[derive(Serialize)]
+struct ChatCompletionRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    temperature: f32,
+    max_tokens: u32,
+}
+
+#[derive(Serialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct ChatCompletionResponse {
+    #[serde(default)]
+    choices: Vec<ChatChoice>,
+}
+
+#[derive(Deserialize)]
+struct ChatChoice {
+    message: ChatResponseMessage,
+}
+
+#[derive(Deserialize)]
+struct ChatResponseMessage {
+    #[serde(default)]
+    content: String,
+}
+
+/// Polishes and formats raw transcribed text using Groq's high-speed Llama 3.1 8B LLM (~150ms)
+pub async fn post_process_with_llm(
+    api_key: &str,
+    raw_text: &str,
+    style: &str,
+) -> Result<String> {
+    if api_key.trim().is_empty() || raw_text.trim().is_empty() || style == "raw" {
+        return Ok(raw_text.to_string());
+    }
+
+    let system_prompt = match style {
+        "smart_cleanup" => {
+            "You are an expert real-time voice typing assistant. Clean up the provided transcribed speech: \
+             remove stutters, filler words (e.g. um, uh, ah, like, you know, อ่า, เอ่อ, แบบว่า, นะคะ/นะครับซ้ำซ้อน), \
+             fix punctuation, capitalization, and grammar while strictly preserving the speaker's original meaning and language (Thai/English). \
+             Return ONLY the clean formatted text without preamble, explanations, or quotes."
+        }
+        "casual" => {
+            "You are a friendly messaging assistant. Format the transcribed speech for casual messaging (natural, clear, friendly). \
+             Remove stutters and filler words. Return ONLY the formatted message without preamble, explanations, or quotes."
+        }
+        "professional" => {
+            "You are an executive business communication assistant. Refine the transcribed speech into polished, polite, \
+             grammatically pristine business language suitable for an email or official document. \
+             Return ONLY the refined text without preamble, explanations, or quotes."
+        }
+        "code" => {
+            "You are a programming assistant. Convert the spoken words into code, terminal commands, or technical syntax \
+             (camelCase, snake_case, CLI commands, markdown code blocks) as intended by the speaker. \
+             Return ONLY the code or command without preamble or explanations."
+        }
+        "bullet_points" => {
+            "You are a summarization assistant. Convert the transcribed speech into clean, well-organized markdown bullet points. \
+             Return ONLY the bullet points without preamble or conversational remarks."
+        }
+        _ => return Ok(raw_text.to_string()),
+    };
+
+    info!("Running AI Smart Formatting with style '{}' on Groq Llama 3.1 8B...", style);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()?;
+
+    let req_body = ChatCompletionRequest {
+        model: "llama-3.1-8b-instant".to_string(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt.to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: raw_text.to_string(),
+            },
+        ],
+        temperature: 0.2,
+        max_tokens: 1024,
+    };
+
+    let res = client
+        .post("https://api.groq.com/openai/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .header("Content-Type", "application/json")
+        .json(&req_body)
+        .send()
+        .await
+        .context("Failed to connect to Groq Chat Completion API")?;
+
+    if !res.status().is_success() {
+        let err_text = res.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("Groq LLM error: {err_text}"));
+    }
+
+    let parsed: ChatCompletionResponse = res.json().await
+        .context("Failed to parse Groq Chat response")?;
+
+    if let Some(first) = parsed.choices.first() {
+        let clean = first.message.content.trim().to_string();
+        if !clean.is_empty() {
+            info!("AI Smart Formatting completed: '{}'", clean);
+            return Ok(clean);
+        }
+    }
+
+    Ok(raw_text.to_string())
+}
+
