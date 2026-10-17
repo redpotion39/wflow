@@ -2,9 +2,110 @@ use anyhow::Result;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::KeyCombo;
+use ksni::TrayMethods;
+
+static TRAY_HANDLE: Mutex<Option<ksni::Handle<WflowTray>>> = Mutex::new(None);
+
+#[derive(Debug)]
+pub struct WflowTray {
+    pub is_recording: bool,
+    pub tx: mpsc::UnboundedSender<HotkeyEvent>,
+}
+
+impl ksni::Tray for WflowTray {
+    fn id(&self) -> String {
+        "wflow".into()
+    }
+
+    fn title(&self) -> String {
+        "Wflow Voice Dictation".into()
+    }
+
+    fn icon_name(&self) -> String {
+        if self.is_recording {
+            "media-record".into()
+        } else {
+            "audio-input-microphone".into()
+        }
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        let bytes: &[u8] = if self.is_recording {
+            include_bytes!("../../assets/tray_rec_32.png").as_slice()
+        } else {
+            include_bytes!("../../assets/tray_32.png").as_slice()
+        };
+        if let Ok(img) = image::load_from_memory(bytes) {
+            let width = img.width() as i32;
+            let height = img.height() as i32;
+            let mut data = img.into_rgba8().into_vec();
+            for pixel in data.chunks_exact_mut(4) {
+                pixel.rotate_right(1); // RGBA -> ARGB network byte order
+            }
+            vec![ksni::Icon { width, height, data }]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn activate(&mut self, _x: i32, _y: i32) {
+        let _ = self.tx.send(HotkeyEvent::ToggleWindow);
+    }
+
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        use ksni::menu::*;
+        let tx1 = self.tx.clone();
+        let tx2 = self.tx.clone();
+        let is_rec = self.is_recording;
+
+        vec![
+            StandardItem {
+                label: "เปิด / ซ่อน Wflow Studio (Show / Hide)".into(),
+                icon_name: "view-restore".into(),
+                activate: Box::new(move |_| {
+                    let _ = tx1.send(HotkeyEvent::ToggleWindow);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            StandardItem {
+                label: if is_rec {
+                    "⏹️ หยุดบันทึกเสียง (Stop Dictation)".into()
+                } else {
+                    "🎙️ เริ่มบันทึกเสียง (Start Dictation)".into()
+                },
+                icon_name: if is_rec {
+                    "media-playback-stop".into()
+                } else {
+                    "media-record".into()
+                },
+                activate: Box::new(move |_| {
+                    if is_rec {
+                        let _ = tx2.send(HotkeyEvent::Released);
+                    } else {
+                        let _ = tx2.send(HotkeyEvent::Pressed);
+                    }
+                }),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            StandardItem {
+                label: "🔴 ปิดโปรแกรม (Quit Wflow)".into(),
+                icon_name: "application-exit".into(),
+                activate: Box::new(|_| {
+                    std::process::exit(0);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        ]
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ActiveAppContext {
@@ -17,6 +118,7 @@ pub struct ActiveAppContext {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum HotkeyEvent {
     Pressed,
     Released,
@@ -46,6 +148,8 @@ pub fn vk_to_string(vk: u16) -> String {
         0xA5 => "Right Alt".to_string(),
         0x14 => "Caps Lock".to_string(),
         0x20 => "Space".to_string(),
+        0x30..=0x39 => format!("{}", (vk as u8) as char),
+        0x41..=0x5A => format!("{}", (vk as u8) as char),
         other => format!("Key(0x{:02X})", other),
     }
 }
@@ -121,6 +225,27 @@ impl PlatformManager {
             *lock = initial_toggle.key;
         }
 
+        // Spawn Linux System Tray via ksni in background thread
+        let tray_tx = tx.clone();
+        let tray = WflowTray {
+            is_recording: false,
+            tx: tray_tx,
+        };
+
+        std::thread::spawn(move || {
+            match async_io::block_on(tray.spawn()) {
+                Ok(handle) => {
+                    info!("Linux StatusNotifierItem System Tray started successfully!");
+                    if let Ok(mut lock) = TRAY_HANDLE.lock() {
+                        *lock = Some(handle);
+                    }
+                }
+                Err(err) => {
+                    warn!("Could not start Linux StatusNotifierItem System Tray: {:?}", err);
+                }
+            }
+        });
+
         info!("Starting Linux background hotkey listener thread...");
         let handle = std::thread::spawn(move || {
             while !tx.is_closed() {
@@ -131,18 +256,22 @@ impl PlatformManager {
         Ok(handle)
     }
 
+    #[allow(dead_code)]
     pub fn get_hotkey_vk() -> u16 {
         *HOTKEY_VK.lock().unwrap()
     }
 
+    #[allow(dead_code)]
     pub fn get_toggle_window_vk() -> u16 {
         *TOGGLE_VK.lock().unwrap()
     }
 
+    #[allow(dead_code)]
     pub fn get_hotkey_combo() -> KeyCombo {
         KeyCombo::single(*HOTKEY_VK.lock().unwrap())
     }
 
+    #[allow(dead_code)]
     pub fn get_toggle_window_combo() -> KeyCombo {
         KeyCombo::single(*TOGGLE_VK.lock().unwrap())
     }
@@ -173,9 +302,38 @@ impl PlatformManager {
     pub fn update_hud_amplitude(_amp: f32) {}
     pub fn hide_floating_hud() {}
 
-    pub fn show_main_window() {}
-    pub fn hide_main_window() {}
-    pub fn toggle_main_window() {}
+    pub fn set_tray_recording_state(is_recording: bool) {
+        if let Ok(lock) = TRAY_HANDLE.lock() {
+            if let Some(handle) = lock.as_ref() {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    async_io::block_on(async {
+                        h.update(|tray: &mut WflowTray| {
+                            tray.is_recording = is_recording;
+                        })
+                        .await;
+                    });
+                });
+            }
+        }
+    }
+
+    pub fn show_main_window() {
+        let _ = std::process::Command::new("xdotool")
+            .args(&["search", "--name", "Wflow", "windowactivate"])
+            .status();
+    }
+
+    pub fn hide_main_window() {
+        let _ = std::process::Command::new("xdotool")
+            .args(&["search", "--name", "Wflow", "windowminimize"])
+            .status();
+    }
+
+    #[allow(dead_code)]
+    pub fn toggle_main_window() {
+        // Handled via ToggleWindow event in coordinator
+    }
 
     /// Checks if Wflow is configured to automatically start on Ubuntu/Linux boot via XDG Autostart
     pub fn is_autostart_enabled() -> bool {

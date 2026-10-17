@@ -9,6 +9,7 @@ mod platform;
 mod proto;
 mod sound;
 mod stt;
+pub mod thai;
 mod ui;
 
 use anyhow::Result;
@@ -111,12 +112,12 @@ fn main() -> Result<()> {
     };
 
     info!("Launching Native GUI window...");
-    eframe::run_native(
+    let _ = eframe::run_native(
         "Wflow",
         native_options,
         Box::new(move |_cc| Ok(Box::new(WisprFlowGui::new(app_state_gui, gui_tx)))),
-    )
-    .map_err(|e| anyhow::anyhow!("GUI error: {}", e))
+    );
+    std::process::exit(0);
 }
 
 fn load_app_icon() -> Option<eframe::egui::IconData> {
@@ -212,6 +213,27 @@ async fn run_background_coordinator(
                         info!("Received ToggleWindow event from Hotkey or Tray Icon.");
                         #[cfg(target_os = "windows")]
                         PlatformManager::toggle_main_window();
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            let curr = state.window_visible.load(Ordering::SeqCst);
+                            state.window_visible.store(!curr, Ordering::SeqCst);
+                            if let Ok(lock) = state.egui_ctx.lock() {
+                                if let Some(ctx) = lock.as_ref() {
+                                    if curr {
+                                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Minimized(true));
+                                    } else {
+                                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Minimized(false));
+                                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
+                                    }
+                                    ctx.request_repaint();
+                                }
+                            }
+                            if !curr {
+                                PlatformManager::show_main_window();
+                            } else {
+                                PlatformManager::hide_main_window();
+                            }
+                        }
                     }
                     Some(HotkeyEvent::KeyRecorded(mode, combo)) => {
                         info!("Key recorded: mode={}, combo={}", mode, combo.format_display());
@@ -245,12 +267,7 @@ async fn run_background_coordinator(
                     Some(HotkeyEvent::QuitApp) => {
                         info!("Received QuitApp event from Tray menu.");
                         state.pending_quit.store(true, Ordering::SeqCst);
-                        if let Ok(lock) = state.egui_ctx.lock() {
-                            if let Some(ctx) = lock.as_ref() {
-                                ctx.request_repaint();
-                            }
-                        }
-                        break;
+                        std::process::exit(0);
                     }
                     None => break,
                 }
@@ -690,12 +707,13 @@ async fn finish_dictation_session(
             }
         }
         SttProvider::Groq => {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             let samples = session_audio_samples.lock().unwrap().clone();
             info!("Groq STT processing {} audio samples ({:.2}s)", samples.len(), duration);
 
             match groq_api_key {
                 Some(key) if !key.trim().is_empty() => {
-                    if samples.len() >= 3200 { // at least 0.2s of audio
+                    if samples.len() >= 1600 { // at least 0.1s of audio
                         match pcm_to_wav(&samples, TARGET_SAMPLE_RATE) {
                             Ok(wav_bytes) => {
                                 match transcribe_groq(&key, &groq_model, &language_code, wav_bytes).await {
@@ -715,23 +733,25 @@ async fn finish_dictation_session(
                             }
                         }
                     } else {
-                        info!("Audio too short (< 0.2s) for Groq transcription.");
+                        info!("Audio too short (< 0.1s) for Groq transcription.");
+                        state.set_toast("⚠️ สัญญาณเสียงสั้นเกินไป กรุณากดพูดค้างไว้อย่างน้อย 1 วินาที");
                     }
                 }
                 _ => {
                     warn!("Groq API key is not configured.");
                     sound::play_sound(sound::SoundEffect::Error);
-                    state.set_toast("Groq API key is missing. Set it in Settings tab.");
+                    state.set_toast("⚠️ Groq API key ยังไม่ได้ตั้งค่า (ไปที่แท็บ Settings)");
                 }
             }
         }
         SttProvider::ElevenLabs => {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             let samples = session_audio_samples.lock().unwrap().clone();
             info!("ElevenLabs STT processing {} audio samples ({:.2}s)", samples.len(), duration);
 
             match elevenlabs_api_key {
                 Some(key) if !key.trim().is_empty() => {
-                    if samples.len() >= 3200 { // at least 0.2s of audio
+                    if samples.len() >= 1600 { // at least 0.1s of audio
                         match pcm_to_wav(&samples, TARGET_SAMPLE_RATE) {
                             Ok(wav_bytes) => {
                                 match transcribe_elevenlabs(&key, &elevenlabs_model, &language_code, wav_bytes).await {
@@ -751,13 +771,14 @@ async fn finish_dictation_session(
                             }
                         }
                     } else {
-                        info!("Audio too short (< 0.2s) for ElevenLabs transcription.");
+                        info!("Audio too short (< 0.1s) for ElevenLabs transcription.");
+                        state.set_toast("⚠️ สัญญาณเสียงสั้นเกินไป กรุณากดพูดค้างไว้อย่างน้อย 1 วินาที");
                     }
                 }
                 _ => {
                     warn!("ElevenLabs API key is not configured.");
                     sound::play_sound(sound::SoundEffect::Error);
-                    state.set_toast("ElevenLabs API key is missing. Set it in Settings tab.");
+                    state.set_toast("⚠️ ElevenLabs API key ยังไม่ได้ตั้งค่า (ไปที่แท็บ Settings)");
                 }
             }
         }

@@ -1,5 +1,7 @@
 use std::env;
+#[cfg(windows)]
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::process::Command;
 
 fn main() {

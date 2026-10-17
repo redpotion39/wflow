@@ -28,10 +28,25 @@ impl Database {
         let path = match custom_path {
             Some(p) => p.to_path_buf(),
             None => {
-                let app_data = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-                let dir = PathBuf::from(app_data).join("Wispr Flow");
-                let _ = std::fs::create_dir_all(&dir);
-                dir.join("flow.sqlite")
+                #[cfg(target_os = "windows")]
+                {
+                    let app_data = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+                    let dir = PathBuf::from(app_data).join("Wispr Flow");
+                    let _ = std::fs::create_dir_all(&dir);
+                    dir.join("flow.sqlite")
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let data_dir = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+                        PathBuf::from(xdg).join("wflow")
+                    } else if let Ok(home) = std::env::var("HOME") {
+                        PathBuf::from(home).join(".local").join("share").join("wflow")
+                    } else {
+                        PathBuf::from(".")
+                    };
+                    let _ = std::fs::create_dir_all(&data_dir);
+                    data_dir.join("flow.sqlite")
+                }
             }
         };
 

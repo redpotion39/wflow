@@ -153,6 +153,15 @@ pub struct AppConfig {
     pub auto_start: bool,
     #[serde(default)]
     pub auth_token: Option<String>,
+    #[serde(default = "default_close_to_tray")]
+    pub close_to_tray: bool,
+}
+
+fn default_close_to_tray() -> bool {
+    #[cfg(target_os = "windows")]
+    { true }
+    #[cfg(not(target_os = "windows"))]
+    { false }
 }
 
 fn default_hotkey_combo() -> KeyCombo {
@@ -224,14 +233,32 @@ impl Default for AppConfig {
             auto_paste: true,
             auto_start: false,
             auth_token: token,
+            close_to_tray: default_close_to_tray(),
         }
     }
 }
 
 impl AppConfig {
     pub fn default_path() -> PathBuf {
-        let app_data = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(app_data).join("Wispr Flow").join("flow-rust.json")
+        #[cfg(target_os = "windows")]
+        {
+            let app_data = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+            let dir = PathBuf::from(app_data).join("Wispr Flow");
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join("flow-rust.json")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let config_dir = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+                PathBuf::from(xdg).join("wflow")
+            } else if let Ok(home) = std::env::var("HOME") {
+                PathBuf::from(home).join(".config").join("wflow")
+            } else {
+                PathBuf::from(".")
+            };
+            let _ = std::fs::create_dir_all(&config_dir);
+            config_dir.join("config.json")
+        }
     }
 
     /// Automatically scans and extracts logged-in Wispr Flow JWT token from session.json
@@ -264,7 +291,19 @@ impl AppConfig {
     pub fn load_or_default(custom_path: Option<&Path>) -> Self {
         let path = match custom_path {
             Some(p) => p.to_path_buf(),
-            None => Self::default_path(),
+            None => {
+                let p = Self::default_path();
+                if !p.exists() {
+                    // Check fallback alternative paths
+                    let alternatives = [
+                        PathBuf::from("config.json"),
+                        PathBuf::from("Wispr Flow/flow-rust.json"),
+                    ];
+                    alternatives.into_iter().find(|alt| alt.exists()).unwrap_or(p)
+                } else {
+                    p
+                }
+            }
         };
 
         if path.exists() {
@@ -313,6 +352,9 @@ impl AppConfig {
 
         let mut default_config = Self::default();
         default_config.auto_start = crate::platform::PlatformManager::is_autostart_enabled();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         if let Ok(json) = serde_json::to_string_pretty(&default_config) {
             let _ = std::fs::write(&path, json);
         }
@@ -328,6 +370,9 @@ impl AppConfig {
             Some(p) => p.to_path_buf(),
             None => Self::default_path(),
         };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let json = serde_json::to_string_pretty(&clone)?;
         std::fs::write(&path, json)?;
         info!("Saved configuration to {:?}", path);

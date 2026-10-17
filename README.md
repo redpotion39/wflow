@@ -112,33 +112,49 @@ cargo run --release
   iscc installer.iss
   ```
 
-### Linux (Ubuntu / Debian)
+### Linux (Ubuntu / Debian & All Distributions)
 
-#### 1. Install via Debian Package (`.deb`):
+#### 1. Universal Self-Extracting Installer (`.run`):
+Runs on any Linux distribution (Ubuntu, Debian, Fedora, Arch, etc.):
+```bash
+# User install (no sudo / root required):
+./dist/wflow-0.1.0-linux-x86_64.run --user
+
+# System-wide install:
+sudo ./dist/wflow-0.1.0-linux-x86_64.run --system
+```
+
+#### 2. Install via Debian Package (`.deb`):
 ```bash
 sudo dpkg -i dist/wflow_0.1.0_amd64.deb
 sudo apt-get install -f   # Fix any missing system dependencies
 ```
 
-#### 2. Install via Universal Install Script:
+#### 3. Install via Universal Shell Script:
 ```bash
-chmod +x install.sh
-sudo ./install.sh
+# User install:
+./install.sh --user
+
+# System install:
+sudo ./install.sh --system
 ```
 
-#### 3. Build `.deb` Package from source on Ubuntu:
+#### 4. Build All Linux Packages from Source:
 ```bash
 # Install Ubuntu build prerequisites
 sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libasound2-dev libssl-dev libx11-dev libxkbcommon-dev xdotool dpkg-dev
+sudo apt-get install -y build-essential pkg-config libasound2-dev libssl-dev libx11-dev libxkbcommon-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev xdotool dpkg-dev
 
-# Build the .deb installer
-bash packaging/linux/build-deb.sh
+# Build all installers (.deb, .run, .tar.gz)
+bash packaging/linux/build-all.sh
 ```
-The resulting `.deb` package will be placed at `dist/wflow_0.1.0_amd64.deb`.
+All outputs are generated in the `dist/` directory:
+- `dist/wflow_0.1.0_amd64.deb`
+- `dist/wflow-0.1.0-linux-x86_64.run`
+- `dist/wflow-0.1.0-linux-x86_64.tar.gz`
 
-#### 4. Automated GitHub Actions CI/CD:
-Every push or release automatically triggers `.github/workflows/build-ubuntu.yml` to build the Ubuntu `.deb` package and Linux tarball artifact ready for direct download.
+#### 5. Automated GitHub Actions CI/CD:
+Every push or release automatically triggers `.github/workflows/build-ubuntu.yml` to build all Linux installers (`.deb`, `.run`, `.tar.gz`) as downloadable artifacts.
 
 
 ---

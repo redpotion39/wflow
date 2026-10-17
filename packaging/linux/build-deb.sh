@@ -33,6 +33,7 @@ mkdir -p "$STAGING_DIR/usr/share/doc/wflow"
 echo ">> Copying executable and desktop assets..."
 cp target/release/wflow "$STAGING_DIR/usr/bin/wflow"
 chmod 755 "$STAGING_DIR/usr/bin/wflow"
+strip --strip-unneeded "$STAGING_DIR/usr/bin/wflow"
 
 cp assets/icon_256.png "$STAGING_DIR/usr/share/icons/hicolor/256x256/apps/wflow.png"
 chmod 644 "$STAGING_DIR/usr/share/icons/hicolor/256x256/apps/wflow.png"

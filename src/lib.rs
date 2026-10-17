@@ -7,4 +7,5 @@ pub mod platform;
 pub mod proto;
 pub mod sound;
 pub mod stt;
+pub mod thai;
 pub mod ui;

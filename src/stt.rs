@@ -298,3 +298,77 @@ pub async fn post_process_with_llm(
     Ok(raw_text.to_string())
 }
 
+/// Tests connection and validity of the Groq API key
+pub async fn test_groq_api(api_key: &str) -> Result<String> {
+    if api_key.trim().is_empty() {
+        return Err(anyhow::anyhow!("ยังไม่ได้ระบุ Groq API Key! กรุณากรอก API Key ก่อนทดสอบ"));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let res = client
+        .get("https://api.groq.com/openai/v1/models")
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .send()
+        .await
+        .context("ไม่สามารถเชื่อมต่อไปยัง api.groq.com ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต")?;
+
+    let status = res.status();
+    if status.is_success() {
+        Ok("เชื่อมต่อ Groq API สำเร็จ! API Key ถูกต้อง และโมเดล Whisper พร้อมใช้งาน 🚀".to_string())
+    } else if status == reqwest::StatusCode::UNAUTHORIZED {
+        Err(anyhow::anyhow!("Groq API Key ไม่ถูกต้อง (401 Unauthorized)"))
+    } else {
+        let body = res.text().await.unwrap_or_default();
+        Err(anyhow::anyhow!("Groq API เกิดข้อผิดพลาด: HTTP {} - {}", status, body))
+    }
+}
+
+/// Tests connection and validity of the ElevenLabs API key
+pub async fn test_elevenlabs_api(api_key: &str) -> Result<String> {
+    if api_key.trim().is_empty() {
+        return Err(anyhow::anyhow!("ยังไม่ได้ระบุ ElevenLabs API Key! กรุณากรอก API Key ก่อนทดสอบ"));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let res = client
+        .get("https://api.elevenlabs.io/v1/user")
+        .header("xi-api-key", api_key.trim())
+        .send()
+        .await
+        .context("ไม่สามารถเชื่อมต่อไปยัง api.elevenlabs.io ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต")?;
+
+    let status = res.status();
+    if status.is_success() {
+        Ok("เชื่อมต่อ ElevenLabs API สำเร็จ! API Key ถูกต้อง และบริการพร้อมใช้งาน 🎙️".to_string())
+    } else if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        Err(anyhow::anyhow!("ElevenLabs API Key ไม่ถูกต้อง (401 Unauthorized / 403 Forbidden)"))
+    } else {
+        let body = res.text().await.unwrap_or_default();
+        Err(anyhow::anyhow!("ElevenLabs API เกิดข้อผิดพลาด: HTTP {} - {}", status, body))
+    }
+}
+
+/// Tests connection to the WisprFlow endpoint
+pub async fn test_wisprflow_endpoint(endpoint_url: &str) -> Result<String> {
+    if endpoint_url.trim().is_empty() {
+        return Err(anyhow::anyhow!("ยังไม่ได้ระบุ WisprFlow Endpoint URL"));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()?;
+    let res = client.get(endpoint_url.trim()).send().await;
+    match res {
+        Ok(_) => Ok("เชื่อมต่อเซิร์ฟเวอร์ WisprFlow Endpoint สำเร็จ ⚡".to_string()),
+        Err(e) if e.is_connect() || e.is_timeout() => {
+            Err(anyhow::anyhow!("ไม่สามารถเชื่อมต่อ WisprFlow Endpoint ({}): {}", endpoint_url, e))
+        }
+        Err(_) => {
+            // gRPC endpoints reject raw HTTP GET, but server reachability is confirmed
+            Ok("เชื่อมต่อเซิร์ฟเวอร์ WisprFlow สำเร็จ (Endpoint Reachable) ⚡".to_string())
+        }
+    }
+}
+
+

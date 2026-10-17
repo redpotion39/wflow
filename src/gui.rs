@@ -9,6 +9,7 @@ use crate::config::{AppConfig, KeyCombo};
 use crate::db::{DictionaryEntry, HistoryRecord};
 use crate::platform::{ActiveAppContext, PlatformManager};
 use crate::stt::SttProvider;
+use crate::thai::shape_thai;
 use crate::ui::DictationStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +95,7 @@ pub struct WisprFlowGui {
     recording_mode: Option<u8>,
     settings_auto_paste: bool,
     settings_auto_start: bool,
+    settings_close_to_tray: bool,
     settings_stt_provider: SttProvider,
     settings_groq_api_key: String,
     settings_groq_model: String,
@@ -116,7 +118,11 @@ pub struct WisprFlowGui {
     recording_start: Option<Instant>,
     fonts_initialized: bool,
     logo_texture: Option<egui::TextureHandle>,
+    #[allow(dead_code)]
     window_icon_applied: bool,
+    show_exit_confirmation: bool,
+    stt_test_status: Arc<Mutex<Option<Result<String, String>>>>,
+    stt_test_in_progress: Arc<AtomicBool>,
 }
 
 pub const POPULAR_HOTKEYS: &[(&str, KeyCombo)] = &[
@@ -184,6 +190,7 @@ impl WisprFlowGui {
             sound_effects,
             input_device,
             trigger_mode,
+            close_to_tray,
         ) = {
             let cfg = state.config.lock().unwrap();
             (
@@ -205,6 +212,7 @@ impl WisprFlowGui {
                 cfg.sound_effects,
                 cfg.input_device_name.clone(),
                 cfg.recording_trigger_mode.clone(),
+                cfg.close_to_tray,
             )
         };
 
@@ -221,6 +229,7 @@ impl WisprFlowGui {
             recording_mode: None,
             settings_auto_paste: auto_paste,
             settings_auto_start: auto_start,
+            settings_close_to_tray: close_to_tray,
             settings_stt_provider: stt_provider,
             settings_groq_api_key: groq_key,
             settings_groq_model: groq_model,
@@ -241,91 +250,240 @@ impl WisprFlowGui {
             fonts_initialized: false,
             logo_texture: None,
             window_icon_applied: false,
+            show_exit_confirmation: false,
+            stt_test_status: Arc::new(Mutex::new(None)),
+            stt_test_in_progress: Arc::new(AtomicBool::new(false)),
         }
     }
 
     fn configure_thai_fonts(ctx: &egui::Context) {
         let mut fonts = egui::FontDefinitions::default();
 
-        let win_dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
-        let font_dir = std::path::Path::new(&win_dir).join("Fonts");
-
-        // 1. Primary Segoe UI Variable font for crisp modern typography
-        let segoe_candidates = [
-            font_dir.join("SegUIVar.ttf"),
-            font_dir.join("segoeui.ttf"),
-        ];
-        let mut loaded_segoe = false;
-        for path in &segoe_candidates {
-            if path.exists() {
-                if let Ok(bytes) = std::fs::read(path) {
-                    fonts.font_data.insert(
-                        "segoe_ui".to_owned(),
-                        egui::FontData::from_owned(bytes),
-                    );
-                    loaded_segoe = true;
-                    break;
-                }
-            }
-        }
-
-        // 2. Thai font candidates (Leelawadee UI is standard Windows Thai font)
-        let thai_candidates = [
-            font_dir.join("LeelawUI.ttf"),
-            font_dir.join("leelawad.ttf"),
-            font_dir.join("tahoma.ttf"),
-        ];
+        let mut loaded_primary = false;
         let mut loaded_thai = false;
-        for path in &thai_candidates {
-            if path.exists() {
-                if let Ok(bytes) = std::fs::read(path) {
-                    fonts.font_data.insert(
-                        "thai_font".to_owned(),
-                        egui::FontData::from_owned(bytes),
-                    );
-                    loaded_thai = true;
-                    break;
-                }
-            }
-        }
-
-        // 3. Japanese & CJK font candidates (Yu Gothic, MS Gothic, Meiryo, Microsoft YaHei)
-        let cjk_candidates = [
-            font_dir.join("YuGothM.ttc"),
-            font_dir.join("YuGothR.ttc"),
-            font_dir.join("msgothic.ttc"),
-            font_dir.join("meiryo.ttc"),
-            font_dir.join("msyh.ttc"),
-        ];
         let mut loaded_cjk = false;
-        for path in &cjk_candidates {
-            if path.exists() {
-                if let Ok(bytes) = std::fs::read(path) {
-                    fonts.font_data.insert(
-                        "cjk_font".to_owned(),
-                        egui::FontData::from_owned(bytes),
-                    );
-                    loaded_cjk = true;
-                    break;
+        let mut loaded_emoji = false;
+
+        // 1. Primary UI Latin font (Segoe UI on Windows, Ubuntu/Liberation/DejaVu on Linux)
+        #[cfg(target_os = "windows")]
+        {
+            let win_dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
+            let font_dir = std::path::Path::new(&win_dir).join("Fonts");
+            let segoe_candidates = [
+                font_dir.join("SegUIVar.ttf"),
+                font_dir.join("segoeui.ttf"),
+            ];
+            for path in &segoe_candidates {
+                if path.exists() {
+                    if let Ok(bytes) = std::fs::read(path) {
+                        fonts.font_data.insert(
+                            "primary_ui".to_owned(),
+                            egui::FontData::from_owned(bytes),
+                        );
+                        loaded_primary = true;
+                        break;
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+            if let Ok(out) = std::process::Command::new("fc-match").args(&["-f", "%{file}", "sans-serif"]).output() {
+                if out.status.success() {
+                    let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !path_str.is_empty() {
+                        candidates.push(std::path::PathBuf::from(path_str));
+                    }
+                }
+            }
+            candidates.extend(vec![
+                std::path::PathBuf::from("/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
+            ]);
+            for path in candidates {
+                if path.exists() {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        fonts.font_data.insert(
+                            "primary_ui".to_owned(),
+                            egui::FontData::from_owned(bytes),
+                        );
+                        loaded_primary = true;
+                        break;
+                    }
                 }
             }
         }
 
-        // 4. Windows Native Emoji font (seguiemj.ttf)
-        let emoji_path = font_dir.join("seguiemj.ttf");
-        if emoji_path.exists() {
-            if let Ok(bytes) = std::fs::read(&emoji_path) {
-                fonts.font_data.insert(
-                    "segoe_emoji".to_owned(),
-                    egui::FontData::from_owned(bytes),
-                );
+        // 2. Thai font candidates (Leelawadee UI / Tahoma on Windows; Noto Sans Thai / TLWG / Sarabun on Linux)
+        #[cfg(target_os = "windows")]
+        {
+            let win_dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
+            let font_dir = std::path::Path::new(&win_dir).join("Fonts");
+            let thai_candidates = [
+                font_dir.join("LeelawUI.ttf"),
+                font_dir.join("leelawad.ttf"),
+                font_dir.join("tahoma.ttf"),
+            ];
+            for path in &thai_candidates {
+                if path.exists() {
+                    if let Ok(bytes) = std::fs::read(path) {
+                        fonts.font_data.insert(
+                            "thai_font".to_owned(),
+                            egui::FontData::from_owned(bytes),
+                        );
+                        loaded_thai = true;
+                        break;
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+            // Prioritize standard WTT 2.0 / Windows PUA fonts (Garuda, Waree, etc.)
+            // These fonts contain glyphs at 0xF700..0xF71A that eliminate floating tone marks ("สระลอย")
+            // and ascender collisions in toolkits without HarfBuzz.
+            candidates.extend(vec![
+                std::path::PathBuf::from("/usr/share/fonts/truetype/tlwg/Garuda.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/tlwg/Waree.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/tlwg/Laksaman.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/tlwg/Umpush.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/tlwg/Norasi.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/tlwg/TlwgMono.ttf"),
+            ]);
+            if let Ok(home) = std::env::var("HOME") {
+                candidates.push(std::path::PathBuf::from(home).join(".local/share/fonts/truetype/sarabun/Sarabun-Medium.ttf"));
+            }
+            if let Ok(out) = std::process::Command::new("fc-match").args(&["-f", "%{file}", ":lang=th"]).output() {
+                if out.status.success() {
+                    let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !path_str.is_empty() {
+                        candidates.push(std::path::PathBuf::from(path_str));
+                    }
+                }
+            }
+            candidates.extend(vec![
+                std::path::PathBuf::from("/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/noto/NotoSansThaiUI-Regular.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/noto/NotoLoopedThai-Regular.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/freefont/FreeSerif.ttf"),
+            ]);
+            for path in candidates {
+                if path.exists() {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        fonts.font_data.insert(
+                            "thai_font".to_owned(),
+                            egui::FontData::from_owned(bytes),
+                        );
+                        loaded_thai = true;
+                        tracing::info!("Loaded Linux Thai font from {:?}", path);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 3. Japanese & CJK font candidates (Yu Gothic, MS Gothic on Windows; IPA Gothic, Noto CJK on Linux)
+        #[cfg(target_os = "windows")]
+        {
+            let win_dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
+            let font_dir = std::path::Path::new(&win_dir).join("Fonts");
+            let cjk_candidates = [
+                font_dir.join("YuGothM.ttc"),
+                font_dir.join("YuGothR.ttc"),
+                font_dir.join("msgothic.ttc"),
+                font_dir.join("meiryo.ttc"),
+                font_dir.join("msyh.ttc"),
+            ];
+            for path in &cjk_candidates {
+                if path.exists() {
+                    if let Ok(bytes) = std::fs::read(path) {
+                        fonts.font_data.insert(
+                            "cjk_font".to_owned(),
+                            egui::FontData::from_owned(bytes),
+                        );
+                        loaded_cjk = true;
+                        break;
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+            if let Ok(out) = std::process::Command::new("fc-match").args(&["-f", "%{file}", ":lang=ja"]).output() {
+                if out.status.success() {
+                    let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !path_str.is_empty() {
+                        candidates.push(std::path::PathBuf::from(path_str));
+                    }
+                }
+            }
+            candidates.extend(vec![
+                std::path::PathBuf::from("/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/opentype/ipafont-gothic/ipagp.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/fonts-japanese-gothic.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+            ]);
+            for path in candidates {
+                if path.exists() {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        fonts.font_data.insert(
+                            "cjk_font".to_owned(),
+                            egui::FontData::from_owned(bytes),
+                        );
+                        loaded_cjk = true;
+                        tracing::info!("Loaded Linux Japanese/CJK font from {:?}", path);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 4. Emoji font
+        #[cfg(target_os = "windows")]
+        {
+            let win_dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
+            let emoji_path = std::path::Path::new(&win_dir).join("Fonts").join("seguiemj.ttf");
+            if emoji_path.exists() {
+                if let Ok(bytes) = std::fs::read(&emoji_path) {
+                    fonts.font_data.insert(
+                        "emoji_font".to_owned(),
+                        egui::FontData::from_owned(bytes),
+                    );
+                    loaded_emoji = true;
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let emoji_candidates = [
+                std::path::PathBuf::from("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/ancient-scripts/Symbola.ttf"),
+            ];
+            for path in emoji_candidates {
+                if path.exists() {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        fonts.font_data.insert(
+                            "emoji_font".to_owned(),
+                            egui::FontData::from_owned(bytes),
+                        );
+                        loaded_emoji = true;
+                        break;
+                    }
+                }
             }
         }
 
         // Configure font fallback priority: English/Latin -> Thai -> Japanese/CJK -> Emoji
         if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-            if loaded_segoe {
-                family.insert(0, "segoe_ui".to_owned());
+            if loaded_primary {
+                family.insert(0, "primary_ui".to_owned());
             }
             if loaded_thai {
                 family.push("thai_font".to_owned());
@@ -333,7 +491,9 @@ impl WisprFlowGui {
             if loaded_cjk {
                 family.push("cjk_font".to_owned());
             }
-            family.push("segoe_emoji".to_owned());
+            if loaded_emoji {
+                family.push("emoji_font".to_owned());
+            }
         }
 
         if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
@@ -343,10 +503,17 @@ impl WisprFlowGui {
             if loaded_cjk {
                 family.push("cjk_font".to_owned());
             }
+            if loaded_emoji {
+                family.push("emoji_font".to_owned());
+            }
         }
 
-        if loaded_thai || loaded_segoe || loaded_cjk {
+        if loaded_primary || loaded_thai || loaded_cjk {
             ctx.set_fonts(fonts);
+            tracing::info!(
+                "Successfully applied typography: primary={}, thai={}, cjk={}, emoji={}",
+                loaded_primary, loaded_thai, loaded_cjk, loaded_emoji
+            );
         }
     }
 
@@ -462,18 +629,32 @@ impl eframe::App for WisprFlowGui {
             )
         };
 
-        // Window close [X] -> minimize to tray
+        // Window close [X] -> minimize to tray or show exit confirmation modal
         if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            #[cfg(target_os = "windows")]
-            crate::platform::windows::PlatformManager::hide_main_window();
-            self.state.window_visible.store(false, Ordering::SeqCst);
-            self.state.set_toast(&format!("Minimized to Taskbar Tray. Press {} or click tray icon to reopen.", toggle_key_name));
+            if self.state.pending_quit.load(Ordering::SeqCst) {
+                std::process::exit(0);
+            }
+
+            if self.settings_close_to_tray {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                #[cfg(target_os = "windows")]
+                crate::platform::windows::PlatformManager::hide_main_window();
+                #[cfg(not(target_os = "windows"))]
+                {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    crate::platform::PlatformManager::hide_main_window();
+                }
+                self.state.window_visible.store(false, Ordering::SeqCst);
+                self.state.set_toast(&format!("Minimized to Tray. Press {} to reopen.", toggle_key_name));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.show_exit_confirmation = true;
+            }
         }
 
-        // Tray menu exit
+        // Tray menu exit or pending quit
         if self.state.pending_quit.load(Ordering::SeqCst) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            std::process::exit(0);
         }
 
         Self::apply_custom_theme(ctx);
@@ -495,6 +676,15 @@ impl eframe::App for WisprFlowGui {
         // 60 FPS repainting when recording or animating
         if is_rec || status != DictationStatus::Idle || self.recording_mode.is_some() {
             ctx.request_repaint();
+        }
+
+        // In-window hotkey trigger (F8)
+        if self.recording_mode.is_none() && ctx.input(|i| i.key_pressed(egui::Key::F8)) {
+            if is_rec {
+                let _ = self.event_tx.send(GuiEvent::StopDictation);
+            } else {
+                let _ = self.event_tx.send(GuiEvent::StartDictation);
+            }
         }
 
         // 1. Modern Left Sidebar Navigation
@@ -535,6 +725,11 @@ impl eframe::App for WisprFlowGui {
                 // Toast notification overlay
                 self.render_toast(ui);
             });
+
+        // Exit confirmation modal
+        if self.show_exit_confirmation {
+            self.render_exit_confirmation_modal(ctx);
+        }
     }
 }
 
@@ -716,23 +911,47 @@ impl WisprFlowGui {
 
             // Bottom System Status Card
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                ui.add_space(6.0);
+
+                // 1. Explicit Exit Button
+                let exit_btn = egui::Button::new(
+                    egui::RichText::new(shape_thai("🔴 ปิดโปรแกรม (Exit)"))
+                        .font(FontId::proportional(11.5))
+                        .color(Color32::from_rgb(252, 165, 165))
+                        .strong(),
+                )
+                .fill(Color32::from_rgb(45, 18, 22))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(185, 28, 28)))
+                .rounding(Rounding::same(7.0))
+                .min_size(Vec2::new(ui.available_width(), 30.0));
+
+                if ui.add(exit_btn).clicked() {
+                    self.show_exit_confirmation = true;
+                }
+
                 ui.add_space(4.0);
 
+                // 2. Minimize Button
                 let hide_btn = egui::Button::new(
-                    egui::RichText::new(format!("📌 Minimize ({})", toggle_key_name))
+                    egui::RichText::new(shape_thai(&format!("📌 ย่อหน้าต่าง ({})", toggle_key_name)))
                         .font(FontId::proportional(11.5))
                         .color(Color32::from_rgb(203, 213, 225)),
                 )
                 .fill(Color32::from_rgb(22, 29, 44))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(38, 50, 74)))
                 .rounding(Rounding::same(7.0))
-                .min_size(Vec2::new(ui.available_width(), 32.0));
+                .min_size(Vec2::new(ui.available_width(), 30.0));
 
                 if ui.add(hide_btn).clicked() {
                     #[cfg(target_os = "windows")]
                     crate::platform::windows::PlatformManager::hide_main_window();
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        crate::platform::PlatformManager::hide_main_window();
+                    }
                     self.state.window_visible.store(false, Ordering::SeqCst);
-                    self.state.set_toast(&format!("Minimized to Tray. Press {} to reopen.", toggle_key_name));
+                    self.state.set_toast(&format!("Minimized. Press {} to reopen.", toggle_key_name));
                 }
 
                 ui.add_space(8.0);
@@ -822,7 +1041,7 @@ impl WisprFlowGui {
         &mut self,
         ui: &mut egui::Ui,
         status: DictationStatus,
-        _is_rec: bool,
+        is_rec: bool,
         dictate_key_name: &str,
         _toggle_key_name: &str,
     ) {
@@ -849,6 +1068,38 @@ impl WisprFlowGui {
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Quick Dictate Action Button
+                let quick_btn = if is_rec {
+                    egui::Button::new(
+                        egui::RichText::new(shape_thai("⏹️ หยุด (Stop)"))
+                            .font(FontId::proportional(12.0))
+                            .color(Color32::WHITE)
+                            .strong(),
+                    )
+                    .fill(Color32::from_rgb(185, 28, 28))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(239, 68, 68)))
+                    .rounding(Rounding::same(8.0))
+                } else {
+                    egui::Button::new(
+                        egui::RichText::new(shape_thai("🎙️ เริ่มพูด (Dictate)"))
+                            .font(FontId::proportional(12.0))
+                            .color(Color32::WHITE)
+                            .strong(),
+                    )
+                    .fill(Color32::from_rgb(37, 99, 235))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250)))
+                    .rounding(Rounding::same(8.0))
+                };
+
+                if ui.add(quick_btn).clicked() {
+                    if is_rec {
+                        let _ = self.event_tx.send(GuiEvent::StopDictation);
+                    } else {
+                        let _ = self.event_tx.send(GuiEvent::StartDictation);
+                    }
+                }
+
+                ui.add_space(8.0);
                 let (status_text, bg_color, border_color) = match status {
                     DictationStatus::Idle => (
                         format!("● Ready [{}]", dictate_key_name),
@@ -1269,7 +1520,7 @@ impl WisprFlowGui {
                                     ui.add_space(20.0);
                                 } else {
                                     ui.label(
-                                        egui::RichText::new(&transcript)
+                                        egui::RichText::new(shape_thai(&transcript))
                                             .font(FontId::proportional(15.0))
                                             .color(Color32::from_rgb(248, 250, 252)),
                                     );
@@ -1593,7 +1844,7 @@ impl WisprFlowGui {
 
                             ui.add_space(6.0);
                             ui.label(
-                                egui::RichText::new(&rec.formatted_text)
+                                egui::RichText::new(shape_thai(&rec.formatted_text))
                                     .font(FontId::proportional(14.0))
                                     .color(Color32::from_rgb(241, 245, 249)),
                             );
@@ -1782,7 +2033,7 @@ impl WisprFlowGui {
                                 ui.add_space(6.0);
 
                                 ui.label(
-                                    egui::RichText::new(&entry.word)
+                                    egui::RichText::new(shape_thai(&entry.word))
                                         .font(FontId::proportional(14.0))
                                         .color(Color32::WHITE)
                                         .strong(),
@@ -1796,7 +2047,7 @@ impl WisprFlowGui {
                                                 .color(Color32::from_rgb(148, 163, 184)),
                                         );
                                         ui.label(
-                                            egui::RichText::new(repl)
+                                            egui::RichText::new(shape_thai(repl))
                                                 .font(FontId::proportional(13.5))
                                                 .color(Color32::from_rgb(203, 213, 225)),
                                         );
@@ -2071,7 +2322,20 @@ impl WisprFlowGui {
                         self.state.set_toast(msg);
                     }
                     ui.label(
-                        egui::RichText::new("  └ Launches Wflow minimized in the taskbar notification tray when your PC boots.")
+                        egui::RichText::new("  └ Launches Wflow automatically when your system boots.")
+                            .font(FontId::proportional(11.0))
+                            .color(Color32::from_rgb(148, 163, 184)),
+                    );
+
+                    ui.add_space(8.0);
+
+                    // Close to Tray Checkbox
+                    ui.checkbox(
+                        &mut self.settings_close_to_tray,
+                        shape_thai("ย่อลง System Tray เมื่อกดปุ่ม [X] (Minimize to tray on close)"),
+                    );
+                    ui.label(
+                        egui::RichText::new(shape_thai("  └ หากไม่เลือก จะแสดงหน้าต่างยืนยันการปิดโปรแกรมเมื่อกดปุ่ม [X]"))
                             .font(FontId::proportional(11.0))
                             .color(Color32::from_rgb(148, 163, 184)),
                     );
@@ -2252,30 +2516,34 @@ impl WisprFlowGui {
                         for (idx, (p, title, desc, color)) in providers.iter().enumerate() {
                             let is_sel = self.settings_stt_provider == *p;
                             pcols[idx].vertical(|ui| {
-                                egui::Frame::none()
-                                    .fill(if is_sel { Color32::from_rgb(26, 34, 52) } else { Color32::from_rgb(15, 20, 32) })
-                                    .stroke(if is_sel { Stroke::new(1.5_f32, *color) } else { Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)) })
+                                let card_bg = if is_sel { Color32::from_rgb(26, 34, 52) } else { Color32::from_rgb(15, 20, 32) };
+                                let card_stroke = if is_sel { Stroke::new(1.8_f32, *color) } else { Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)) };
+                                let card_resp = egui::Frame::none()
+                                    .fill(card_bg)
+                                    .stroke(card_stroke)
                                     .rounding(Rounding::same(8.0))
                                     .inner_margin(egui::Margin::same(10.0))
                                     .show(ui, |ui| {
-                                        let check = if is_sel { "✔ " } else { "" };
-                                        if ui.add(
-                                            egui::Button::new(
+                                        let check = if is_sel { "🔘 " } else { "⚪ " };
+                                        ui.horizontal(|ui| {
+                                            ui.label(
                                                 egui::RichText::new(format!("{}{}", check, title))
                                                     .font(FontId::proportional(13.0))
                                                     .color(if is_sel { Color32::WHITE } else { Color32::from_rgb(203, 213, 225) })
                                                     .strong(),
-                                            )
-                                            .fill(Color32::TRANSPARENT),
-                                        ).clicked() {
-                                            self.settings_stt_provider = *p;
-                                        }
+                                            );
+                                        });
+                                        ui.add_space(4.0);
                                         ui.label(
                                             egui::RichText::new(desc)
                                                 .font(FontId::proportional(10.5))
                                                 .color(Color32::from_rgb(148, 163, 184)),
                                         );
                                     });
+
+                                if card_resp.response.interact(egui::Sense::click()).clicked() {
+                                    self.settings_stt_provider = *p;
+                                }
                             });
                         }
                     });
@@ -2371,6 +2639,74 @@ impl WisprFlowGui {
                                     .font(FontId::proportional(11.0))
                                     .color(Color32::from_rgb(148, 163, 184)),
                             );
+                        }
+                    }
+
+                    ui.add_space(14.0);
+                    ui.separator();
+                    ui.add_space(10.0);
+
+                    let in_progress = self.stt_test_in_progress.load(Ordering::SeqCst);
+                    ui.horizontal(|ui| {
+                        let btn_label = if in_progress {
+                            "⏳ กำลังทดสอบการเชื่อมต่อ STT..."
+                        } else {
+                            "🧪 ทดสอบการเชื่อมต่อ STT (Test STT Provider)"
+                        };
+                        let test_btn = egui::Button::new(
+                            egui::RichText::new(shape_thai(btn_label))
+                                .font(FontId::proportional(12.0))
+                                .color(Color32::WHITE)
+                                .strong(),
+                        )
+                        .fill(Color32::from_rgb(14, 116, 144))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(6, 182, 212)))
+                        .rounding(Rounding::same(6.0))
+                        .min_size(Vec2::new(180.0, 32.0));
+
+                        if ui.add_enabled(!in_progress, test_btn).clicked() {
+                            self.run_stt_test();
+                        }
+
+                        if in_progress {
+                            ui.spinner();
+                        }
+                    });
+
+                    // Show test result banner if available
+                    if let Ok(lock) = self.stt_test_status.lock() {
+                        if let Some(ref res) = *lock {
+                            ui.add_space(8.0);
+                            match res {
+                                Ok(msg) => {
+                                    egui::Frame::none()
+                                        .fill(Color32::from_rgb(12, 38, 28))
+                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(34, 197, 94)))
+                                        .rounding(Rounding::same(6.0))
+                                        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(shape_thai(&format!("✅ {}", msg)))
+                                                    .font(FontId::proportional(12.0))
+                                                    .color(Color32::from_rgb(134, 239, 172)),
+                                            );
+                                        });
+                                }
+                                Err(err_msg) => {
+                                    egui::Frame::none()
+                                        .fill(Color32::from_rgb(45, 18, 22))
+                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(239, 68, 68)))
+                                        .rounding(Rounding::same(6.0))
+                                        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(shape_thai(&format!("❌ {}", err_msg)))
+                                                    .font(FontId::proportional(12.0))
+                                                    .color(Color32::from_rgb(252, 165, 165)),
+                                            );
+                                        });
+                                }
+                            }
                         }
                     }
                 });
@@ -2470,6 +2806,7 @@ impl WisprFlowGui {
                     language_code: self.settings_language.clone(),
                     auto_paste: self.settings_auto_paste,
                     auto_start: self.settings_auto_start,
+                    close_to_tray: self.settings_close_to_tray,
                     auth_token: if self.settings_token.is_empty() {
                         None
                     } else {
@@ -2511,7 +2848,7 @@ impl WisprFlowGui {
                     ui.painter().text(
                         toast_rect.center(),
                         egui::Align2::CENTER_CENTER,
-                        &msg,
+                        shape_thai(&msg),
                         FontId::proportional(12.5),
                         Color32::WHITE,
                     );
@@ -2519,6 +2856,159 @@ impl WisprFlowGui {
                     *lock = None;
                 }
             }
+        }
+    }
+
+    fn run_stt_test(&mut self) {
+        if self.stt_test_in_progress.load(Ordering::SeqCst) {
+            return;
+        }
+
+        self.stt_test_in_progress.store(true, Ordering::SeqCst);
+        let in_progress = Arc::clone(&self.stt_test_in_progress);
+        let status_lock = Arc::clone(&self.stt_test_status);
+        let provider = self.settings_stt_provider;
+        let groq_key = self.settings_groq_api_key.clone();
+        let eleven_key = self.settings_elevenlabs_api_key.clone();
+        let endpoint = self.settings_endpoint.clone();
+        let egui_ctx = Arc::clone(&self.state.egui_ctx);
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            if let Ok(rt) = rt {
+                rt.block_on(async move {
+                    let res = match provider {
+                        SttProvider::Groq => crate::stt::test_groq_api(&groq_key).await,
+                        SttProvider::ElevenLabs => crate::stt::test_elevenlabs_api(&eleven_key).await,
+                        SttProvider::WisprFlow => crate::stt::test_wisprflow_endpoint(&endpoint).await,
+                    };
+
+                    let mapped_res = match res {
+                        Ok(msg) => Ok(msg),
+                        Err(err) => Err(err.to_string()),
+                    };
+
+                    if let Ok(mut lock) = status_lock.lock() {
+                        *lock = Some(mapped_res);
+                    }
+                    in_progress.store(false, Ordering::SeqCst);
+
+                    if let Ok(lock) = egui_ctx.lock() {
+                        if let Some(ctx) = lock.as_ref() {
+                            ctx.request_repaint();
+                        }
+                    }
+                });
+            } else {
+                in_progress.store(false, Ordering::SeqCst);
+            }
+        });
+    }
+
+    fn render_exit_confirmation_modal(&mut self, ctx: &egui::Context) {
+        let toggle_key_name = self.settings_toggle.format_display();
+        let mut close_modal = false;
+        let mut do_exit = false;
+        let mut do_tray = false;
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            close_modal = true;
+        }
+
+        egui::Window::new(shape_thai("⚠️ ยืนยันการปิดโปรแกรม (Confirm Exit)"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .fixed_size([380.0, 150.0])
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(shape_thai("คุณต้องการปิดโปรแกรม Wflow ใช่หรือไม่?"))
+                        .font(FontId::proportional(14.5))
+                        .color(Color32::WHITE)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(shape_thai("หากเลือก 'ย่อลง Tray' โปรแกรมจะยังคงรอรับคำสั่งเสียงผ่านปุ่มลัดได้ในพื้นหลัง"))
+                        .font(FontId::proportional(11.5))
+                        .color(Color32::from_rgb(148, 163, 184)),
+                );
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(12.0);
+
+                ui.horizontal(|ui| {
+                    // 1. Confirm Exit
+                    let exit_btn = egui::Button::new(
+                        egui::RichText::new(shape_thai("🔴 ปิดโปรแกรม (Exit)"))
+                            .font(FontId::proportional(11.5))
+                            .color(Color32::WHITE)
+                            .strong(),
+                    )
+                    .fill(Color32::from_rgb(185, 28, 28))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(239, 68, 68)))
+                    .rounding(Rounding::same(6.0))
+                    .min_size(Vec2::new(120.0, 32.0));
+
+                    if ui.add(exit_btn).clicked() {
+                        do_exit = true;
+                    }
+
+                    ui.add_space(6.0);
+
+                    // 2. Minimize to Tray
+                    let tray_btn = egui::Button::new(
+                        egui::RichText::new(shape_thai("📌 ย่อลง Tray"))
+                            .font(FontId::proportional(11.5))
+                            .color(Color32::WHITE),
+                    )
+                    .fill(Color32::from_rgb(30, 41, 59))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(71, 85, 105)))
+                    .rounding(Rounding::same(6.0))
+                    .min_size(Vec2::new(105.0, 32.0));
+
+                    if ui.add(tray_btn).clicked() {
+                        do_tray = true;
+                    }
+
+                    ui.add_space(6.0);
+
+                    // 3. Cancel
+                    let cancel_btn = egui::Button::new(
+                        egui::RichText::new(shape_thai("ยกเลิก (Cancel)"))
+                            .font(FontId::proportional(11.5))
+                            .color(Color32::from_rgb(203, 213, 225)),
+                    )
+                    .fill(Color32::from_rgb(22, 29, 44))
+                    .rounding(Rounding::same(6.0))
+                    .min_size(Vec2::new(85.0, 32.0));
+
+                    if ui.add(cancel_btn).clicked() {
+                        close_modal = true;
+                    }
+                });
+            });
+
+        if do_exit {
+            self.show_exit_confirmation = false;
+            self.state.pending_quit.store(true, Ordering::SeqCst);
+            std::process::exit(0);
+        } else if do_tray {
+            self.show_exit_confirmation = false;
+            #[cfg(target_os = "windows")]
+            crate::platform::windows::PlatformManager::hide_main_window();
+            #[cfg(not(target_os = "windows"))]
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                crate::platform::PlatformManager::hide_main_window();
+                self.state.window_visible.store(false, Ordering::SeqCst);
+            }
+            self.state.set_toast(&format!("ย่อลง Tray แล้ว กด {} หรือคลิกที่ Tray เพื่อเปิดใหม่", toggle_key_name));
+        } else if close_modal {
+            self.show_exit_confirmation = false;
         }
     }
 }

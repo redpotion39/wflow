@@ -1,4 +1,4 @@
-name: Build Ubuntu Installer (.deb)
+name: Build Linux Installers (.deb, .run & tarball)
 
 on:
   push:
@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-ubuntu:
-    name: Build Ubuntu (.deb & tarball)
+  build-linux:
+    name: Build Linux Installers
     runs-on: ubuntu-22.04
 
     steps:
@@ -48,26 +48,20 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build Release Binary
-        run: cargo build --release
-
-      - name: Build Debian Package (.deb)
-        run: bash packaging/linux/build-deb.sh
-
-      - name: Create Tarball Archive
-        run: |
-          mkdir -p dist
-          tar -czvf dist/wflow-0.1.0-linux-x86_64.tar.gz \
-            -C target/release wflow \
-            -C ../../assets icon_256.png \
-            -C ../../packaging/linux wflow.desktop \
-            -C ../.. install.sh uninstall.sh
+      - name: Build All Linux Packages (.deb, .run, .tar.gz)
+        run: bash packaging/linux/build-all.sh
 
       - name: Upload Debian Package (.deb) Artifact
         uses: actions/upload-artifact@v4
         with:
           name: wflow-ubuntu-deb
           path: dist/*.deb
+
+      - name: Upload Universal .run Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wflow-linux-run-installer
+          path: dist/*.run
 
       - name: Upload Linux Tarball Artifact
         uses: actions/upload-artifact@v4
