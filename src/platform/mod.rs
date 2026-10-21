@@ -1,16 +1,28 @@
+//! Platform abstraction.
+//!
+//! * Windows — native `WH_KEYBOARD_LL` hook, UI Automation, `SendInput` and a
+//!   topmost HUD window.
+//! * Linux — X11/XWayland global hotkeys, a StatusNotifierItem tray and
+//!   `xdotool` based pasting.
+//! * Anything else — a stub implementation that keeps the crate compiling.
+//!
+//! The stub is always type-checked, even on the platforms that do not use it,
+//! so it cannot silently rot. `cargo check --features mock_check` additionally
+//! routes the whole crate through the stub, which is how CI verifies the
+//! macOS/other build.
+
 #[cfg(target_os = "windows")]
 pub mod windows;
 
 #[cfg(target_os = "windows")]
 pub use windows::*;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "mock_check")))]
 pub mod linux;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "mock_check")))]
 pub use linux::*;
 
-#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
 pub mod mock {
     use anyhow::Result;
     use tokio::sync::mpsc;
@@ -82,6 +94,15 @@ pub mod mock {
         pub fn set_hud_status(_status: crate::ui::DictationStatus) {}
         pub fn update_hud_amplitude(_amp: f32) {}
         pub fn hide_floating_hud() {}
+        pub fn set_tray_recording_state(_is_recording: bool) {}
+        pub fn update_tray_tooltip(
+            _hotkey: crate::config::KeyCombo,
+            _toggle: crate::config::KeyCombo,
+        ) {
+        }
+        pub fn show_main_window() {}
+        pub fn hide_main_window() {}
+        pub fn toggle_main_window() {}
         pub fn is_autostart_enabled() -> bool {
             false
         }
@@ -94,5 +115,8 @@ pub mod mock {
     }
 }
 
-#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
+#[cfg(any(
+    all(not(target_os = "windows"), not(target_os = "linux")),
+    feature = "mock_check"
+))]
 pub use mock::*;
