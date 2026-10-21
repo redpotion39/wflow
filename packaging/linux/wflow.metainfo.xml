@@ -51,6 +51,14 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.5" date="2026-10-22">
+      <description>
+        <p>Installer fix:</p>
+        <ul>
+          <li>The post-install script now checks every home directory, not just $HOME of root</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.4" date="2026-10-22">
       <description>
         <p>Readable settings and a working update check:</p>

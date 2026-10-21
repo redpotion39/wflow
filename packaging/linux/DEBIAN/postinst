@@ -11,15 +11,26 @@ fi
 
 # A copy in ~/.local/bin takes precedence over /usr/bin for most users, so an
 # older installation there would shadow this package and the app would keep
-# running the previous version. Point it at the packaged binary.
-if [ -x "$HOME/.local/bin/wflow" ]; then
-    if ! cmp -s /usr/bin/wflow "$HOME/.local/bin/wflow"; then
-        echo "wflow: replacing the older copy in ~/.local/bin/wflow with the packaged one"
-        cp /usr/bin/wflow "$HOME/.local/bin/wflow" 2>/dev/null || true
+# running the previous version.
+#
+# The post-install script runs as root, so $HOME is /root and not the home of
+# the person who installed the package. Every home directory is therefore
+# checked explicitly.
+for home_dir in /root /home/*; do
+    [ -d "$home_dir" ] || continue
+    local_bin="$home_dir/.local/bin/wflow"
+    [ -x "$local_bin" ] || continue
+
+    if ! cmp -s /usr/bin/wflow "$local_bin"; then
+        echo "wflow: replacing the older copy in $local_bin with the packaged one"
+        cp /usr/bin/wflow "$local_bin" 2>/dev/null || true
+        chown --reference=/usr/bin/wflow "$local_bin" 2>/dev/null || true
     fi
-    if [ -f "$HOME/.local/share/applications/wflow.desktop" ]; then
-        sed -i 's|^Exec=.*|Exec=/usr/bin/wflow|' "$HOME/.local/share/applications/wflow.desktop" 2>/dev/null || true
+
+    desktop="$home_dir/.local/share/applications/wflow.desktop"
+    if [ -f "$desktop" ]; then
+        sed -i 's|^Exec=.*|Exec=/usr/bin/wflow|' "$desktop" 2>/dev/null || true
     fi
-fi
+done
 
 exit 0
