@@ -14,7 +14,7 @@ pub enum RejectReason {
     Empty,
     /// A known caption/transcript boilerplate phrase.
     Boilerplate,
-    /// Only stage directions such as "(music)" or "[BLANK_AUDIO]".
+    /// Only stage directions such as `(music)` or `[BLANK_AUDIO]`.
     StageDirection,
     /// The same word repeated over and over.
     WordRepetition,
@@ -87,7 +87,7 @@ const STAGE_KEYWORDS: &[&str] = &[
     "traffic",
 ];
 
-/// Removes stage directions such as "(upbeat music)" or "[BLANK_AUDIO]".
+/// Removes stage directions such as `(upbeat music)` or `[BLANK_AUDIO]`.
 ///
 /// Returns the text that is left; if nothing meaningful remains the transcript
 /// only contained non-speech annotations.
