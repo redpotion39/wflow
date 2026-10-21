@@ -71,6 +71,8 @@ pub struct AppState {
     pub update_info: Arc<Mutex<Option<UpdateInfo>>>,
     pub update_error: Arc<Mutex<Option<String>>>,
     pub update_check_running: Arc<AtomicBool>,
+    /// The active noise gate, so the studio can show the voice activity.
+    pub voice_gate: Arc<Mutex<Option<Arc<Mutex<crate::vad::VoiceGate>>>>>,
 }
 
 impl AppState {
@@ -98,6 +100,7 @@ impl AppState {
             update_info: Arc::new(Mutex::new(None)),
             update_error: Arc::new(Mutex::new(None)),
             update_check_running: Arc::new(AtomicBool::new(false)),
+            voice_gate: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -136,6 +139,15 @@ pub struct WisprFlowGui {
     settings_store_textbox_contents: bool,
     settings_max_recording_secs: u64,
     settings_stt_timeout_secs: u64,
+    // Voice filter & text quality
+    settings_silence_filter: bool,
+    settings_silence_sensitivity: f32,
+    settings_silence_stop_secs: u64,
+    settings_hallucination_guard: bool,
+    settings_autocorrect_enabled: bool,
+    settings_autocorrect_use_llm: bool,
+    settings_autocorrect_languages: String,
+    settings_mixed_spacing: bool,
     clear_history_armed: bool,
     // Update checker
     settings_check_updates: bool,
@@ -247,6 +259,14 @@ impl WisprFlowGui {
             store_textbox_contents,
             max_recording_secs,
             stt_timeout_secs,
+            silence_filter,
+            silence_sensitivity,
+            silence_stop_secs,
+            hallucination_guard,
+            autocorrect_enabled,
+            autocorrect_use_llm,
+            autocorrect_languages,
+            mixed_spacing,
             check_updates,
             include_prerelease,
             update_interval_hours,
@@ -278,6 +298,14 @@ impl WisprFlowGui {
                 cfg.store_textbox_contents,
                 cfg.max_recording_secs,
                 cfg.stt_timeout_secs,
+                cfg.silence_filter,
+                cfg.silence_sensitivity,
+                cfg.silence_stop_secs,
+                cfg.hallucination_guard,
+                cfg.autocorrect_enabled,
+                cfg.autocorrect_use_llm,
+                cfg.autocorrect_languages.clone(),
+                cfg.mixed_spacing,
                 cfg.check_updates,
                 cfg.include_prerelease,
                 cfg.update_check_interval_hours,
@@ -310,6 +338,14 @@ impl WisprFlowGui {
             settings_store_textbox_contents: store_textbox_contents,
             settings_max_recording_secs: max_recording_secs,
             settings_stt_timeout_secs: stt_timeout_secs,
+            settings_silence_filter: silence_filter,
+            settings_silence_sensitivity: silence_sensitivity,
+            settings_silence_stop_secs: silence_stop_secs,
+            settings_hallucination_guard: hallucination_guard,
+            settings_autocorrect_enabled: autocorrect_enabled,
+            settings_autocorrect_use_llm: autocorrect_use_llm,
+            settings_autocorrect_languages: autocorrect_languages,
+            settings_mixed_spacing: mixed_spacing,
             clear_history_armed: false,
             settings_check_updates: check_updates,
             settings_include_prerelease: include_prerelease,
@@ -1590,6 +1626,49 @@ impl WisprFlowGui {
                                     .color(Color32::from_rgb(148, 163, 184))
                                     .strong(),
                             );
+
+                            // Voice activity indicator: shows whether the
+                            // noise gate currently hears speech.
+                            if is_rec {
+                                let (speaking, noise, threshold) = {
+                                    let slot = lock(&self.state.voice_gate).clone();
+                                    match slot {
+                                        Some(gate) => {
+                                            let g = lock(&gate);
+                                            (g.is_speaking(), g.noise_floor(), g.threshold())
+                                        }
+                                        None => (true, 0.0, 0.0),
+                                    }
+                                };
+
+                                let (label, color) = if speaking {
+                                    ("🗣️ กำลังพูด", Color32::from_rgb(74, 222, 128))
+                                } else {
+                                    ("🤫 เสียงเงียบ", Color32::from_rgb(148, 163, 184))
+                                };
+
+                                let pill = ui.label(
+                                    egui::RichText::new(format!(
+                                        "{}  {:.0}dB / {:.0}dB",
+                                        label,
+                                        (noise * 1000.0).log10() * 20.0,
+                                        (threshold * 1000.0).log10() * 20.0
+                                    ))
+                                    .font(FontId::monospace(10.5))
+                                    .color(color)
+                                    .strong(),
+                                );
+                                ui.painter().rect_filled(
+                                    pill.rect.expand(3.0),
+                                    Rounding::same(6.0),
+                                    Color32::from_rgb(22, 29, 44),
+                                );
+                                ui.painter().rect_stroke(
+                                    pill.rect.expand(3.0),
+                                    Rounding::same(6.0),
+                                    Stroke::new(1.0_f32, Color32::from_rgb(38, 50, 74)),
+                                );
+                            }
 
                             if is_rec {
                                 let elapsed = self.recording_start.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
@@ -3205,7 +3284,137 @@ impl WisprFlowGui {
 
             ui.add_space(14.0);
 
-            // CARD 4: Privacy & Data
+            // CARD 4: Voice filter & text quality
+            egui::Frame::none()
+                .fill(Color32::from_rgb(17, 23, 36))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
+                .rounding(Rounding::same(12.0))
+                .inner_margin(egui::Margin::same(16.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("🎚️  VOICE FILTER & TEXT QUALITY")
+                            .font(FontId::proportional(12.5))
+                            .color(Color32::from_rgb(148, 163, 184))
+                            .strong(),
+                    );
+                    ui.add_space(10.0);
+
+                    // --- Silence filter -------------------------------------------------
+                    ui.checkbox(
+                        &mut self.settings_silence_filter,
+                        "กรองเสียงเงียบ (Silence filter / noise gate)",
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "  └ ตัดเสียงเงียบและเสียงรบกวนออกก่อนส่งให้โมเดล STT ลดการถอดผิดและประหยัดเน็ต",
+                        )
+                        .font(FontId::proportional(11.0))
+                        .color(Color32::from_rgb(148, 163, 184)),
+                    );
+
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("ความไวต่อเสียงพูด:");
+                        ui.add(
+                            egui::DragValue::new(&mut self.settings_silence_sensitivity)
+                                .range(0.0..=1.0)
+                                .speed(0.02)
+                                .suffix(""),
+                        );
+                        ui.label(
+                            egui::RichText::new(if self.settings_silence_sensitivity > 0.66 {
+                                "ไวมาก"
+                            } else if self.settings_silence_sensitivity > 0.33 {
+                                "ปกติ"
+                            } else {
+                                "ไวน้อย (เก็บเสียงพูดเบาๆ)"
+                            })
+                            .font(FontId::proportional(11.0))
+                            .color(Color32::from_rgb(148, 163, 184)),
+                        );
+                    });
+
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("หยุดอัตโนมัติเมื่อเงียบนาน:");
+                        ui.add(
+                            egui::DragValue::new(&mut self.settings_silence_stop_secs)
+                                .range(0..=600)
+                                .speed(1.0)
+                                .suffix(" วิ"),
+                        );
+                        if self.settings_silence_stop_secs == 0 {
+                            ui.label(
+                                egui::RichText::new("(0 = ไม่หยุดอัตโนมัติ)")
+                                    .font(FontId::proportional(11.0))
+                                    .color(Color32::from_rgb(148, 163, 184)),
+                            );
+                        }
+                    });
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(10.0);
+
+                    // --- Hallucination guard ---------------------------------------------
+                    ui.checkbox(
+                        &mut self.settings_hallucination_guard,
+                        "กันโมเดลพิมพ์มั่ว (Hallucination guard)",
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "  └ ตรวจจับข้อความปลอมแปลงที่โมเดลมักแต่งขึ้นเอง เช่น \"Thank you.\" \"(upbeat music)\" หรือคำที่ซ้ำยาว ๆ แล้วไม่แทรกลงในแอป",
+                        )
+                        .font(FontId::proportional(11.0))
+                        .color(Color32::from_rgb(148, 163, 184)),
+                    );
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(10.0);
+
+                    // --- Spelling correction ---------------------------------------------
+                    ui.checkbox(
+                        &mut self.settings_autocorrect_enabled,
+                        "สะกดคำอัตโนมัติตามภาษา (Automatic spell check)",
+                    );
+                    ui.checkbox(
+                        &mut self.settings_mixed_spacing,
+                        "เติมช่องว่างระหว่างคำไทยกับอังกฤษ (Mixed-language spacing)",
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "  └ เช่น \"ทดสอบAPI\" → \"ทดสอบ API\" และแก้คำพิมพ์ผิดที่พบบ่อยในแต่ละภาษา",
+                        )
+                        .font(FontId::proportional(11.0))
+                        .color(Color32::from_rgb(148, 163, 184)),
+                    );
+
+                    ui.add_space(6.0);
+                    ui.checkbox(
+                        &mut self.settings_autocorrect_use_llm,
+                        "ใช้โมเดลภาษาช่วยสะกดด้วย (ต้องมี Groq API key)",
+                    );
+
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("ภาษาที่ต้องการตรวจสะกด:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.settings_autocorrect_languages)
+                                .desired_width(160.0)
+                                .hint_text("เช่น th,en"),
+                        );
+                        ui.label(
+                            egui::RichText::new("(เว้นว่าง = ตรวจอัตโนมัติตามภาษาของข้อความ)")
+                                .font(FontId::proportional(11.0))
+                                .color(Color32::from_rgb(148, 163, 184)),
+                        );
+                    });
+                });
+
+            ui.add_space(14.0);
+
+            // CARD 5: Privacy & Data
             egui::Frame::none()
                 .fill(Color32::from_rgb(17, 23, 36))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
@@ -3535,6 +3744,14 @@ impl WisprFlowGui {
                     client_name,
                     client_version,
                     stt_timeout_secs,
+                    silence_filter: self.settings_silence_filter,
+                    silence_sensitivity: self.settings_silence_sensitivity.clamp(0.0, 1.0),
+                    silence_stop_secs: self.settings_silence_stop_secs.clamp(0, 600),
+                    hallucination_guard: self.settings_hallucination_guard,
+                    autocorrect_enabled: self.settings_autocorrect_enabled,
+                    autocorrect_use_llm: self.settings_autocorrect_use_llm,
+                    autocorrect_languages: self.settings_autocorrect_languages.trim().to_string(),
+                    mixed_spacing: self.settings_mixed_spacing,
                     auth_token: if self.settings_token.is_empty() {
                         None
                     } else {

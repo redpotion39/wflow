@@ -5,14 +5,23 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
+use crate::vad::{GateDecision, VoiceGate};
+
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 pub const CHUNK_SAMPLES: usize = 1600; // 100 ms at 16 kHz
+
+/// Milliseconds of audio in one chunk.
+pub const CHUNK_MS: u64 = (CHUNK_SAMPLES as u64 * 1000) / TARGET_SAMPLE_RATE as u64;
 
 pub struct AudioRecorder {
     is_recording: Arc<AtomicBool>,
     active_stream: Option<cpal::Stream>,
     current_amplitude: Arc<Mutex<f32>>,
     dropped_chunks: Arc<AtomicU64>,
+    /// Shared noise gate, so the main thread can inspect what was detected.
+    gate: Option<Arc<Mutex<VoiceGate>>>,
+    /// Set by the audio thread when the speaker went quiet for too long.
+    stop_requested: Arc<AtomicBool>,
 }
 
 impl Default for AudioRecorder {
@@ -64,21 +73,61 @@ impl Resampler {
 }
 
 /// Flushes a full chunk to the async channel without blocking the audio thread.
-fn emit_chunk(accumulator: &mut Vec<i16>, tx: &mpsc::Sender<Vec<u8>>, dropped: &AtomicU64) {
+///
+/// When a noise gate is configured the chunk is first classified as speech or
+/// silence; silence is buffered as pre-roll instead of being sent to the
+/// speech-to-text provider.
+fn emit_chunk(
+    accumulator: &mut Vec<i16>,
+    tx: &mpsc::Sender<Vec<u8>>,
+    dropped: &AtomicU64,
+    gate: &Option<Arc<Mutex<VoiceGate>>>,
+    stop_requested: &AtomicBool,
+) -> Option<GateDecision> {
     if accumulator.len() < CHUNK_SAMPLES {
-        return;
+        return None;
     }
+
+    // RMS of the chunk itself, which is what the gate compares against.
+    let sum_sq: f64 = accumulator
+        .iter()
+        .map(|s| {
+            let v = *s as f64 / 32768.0;
+            v * v
+        })
+        .sum();
+    let rms = (sum_sq / accumulator.len() as f64).sqrt() as f32;
+
     let mut bytes = Vec::with_capacity(accumulator.len() * 2);
     for sample in accumulator.iter() {
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
     accumulator.clear();
 
-    if tx.try_send(bytes).is_err() {
-        // The transcriber is behind; drop this chunk but keep the counter so the
-        // user can be warned instead of silently losing audio.
-        dropped.fetch_add(1, Ordering::Relaxed);
-    }
+    let Some(gate) = gate else {
+        if tx.try_send(bytes).is_err() {
+            // The transcriber is behind; drop this chunk but keep the counter so
+            // the user can be warned instead of silently losing audio.
+            dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        return None;
+    };
+
+    let decision = {
+        let mut g = gate.lock().unwrap_or_else(|e| e.into_inner());
+        let (decision, chunks) = g.process(rms, bytes, CHUNK_MS);
+        if decision == GateDecision::SpeechAndStop {
+            stop_requested.store(true, Ordering::SeqCst);
+        }
+        for chunk in chunks {
+            if tx.try_send(chunk).is_err() {
+                dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        decision
+    };
+
+    Some(decision)
 }
 
 /// Enumerates all available audio input devices on the system.
@@ -102,7 +151,30 @@ impl AudioRecorder {
             active_stream: None,
             current_amplitude: Arc::new(Mutex::new(0.0)),
             dropped_chunks: Arc::new(AtomicU64::new(0)),
+            gate: None,
+            stop_requested: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Milliseconds of speech the gate has detected in this session.
+    pub fn detected_speech_ms(&self) -> u64 {
+        self.gate
+            .as_ref()
+            .map(|g| g.lock().unwrap_or_else(|e| e.into_inner()).speech_ms())
+            .unwrap_or(0)
+    }
+
+    /// True when the user is currently speaking.
+    pub fn is_speaking(&self) -> bool {
+        self.gate
+            .as_ref()
+            .map(|g| g.lock().unwrap_or_else(|e| e.into_inner()).is_speaking())
+            .unwrap_or(false)
+    }
+
+    /// True when the gate asked the recorder to stop (long silence).
+    pub fn stop_requested(&self) -> bool {
+        self.stop_requested.load(Ordering::SeqCst)
     }
 
     pub fn is_recording(&self) -> bool {
@@ -121,6 +193,7 @@ impl AudioRecorder {
         &mut self,
         tx: mpsc::Sender<Vec<u8>>,
         target_device_name: Option<&str>,
+        gate: Option<Arc<Mutex<VoiceGate>>>,
     ) -> Result<()> {
         let host = cpal::default_host();
         let device = if let Some(target) = target_device_name {
@@ -164,6 +237,9 @@ impl AudioRecorder {
         let current_amp = self.current_amplitude.clone();
         let dropped = self.dropped_chunks.clone();
         dropped.store(0, Ordering::Relaxed);
+        let stop_requested = self.stop_requested.clone();
+        stop_requested.store(false, Ordering::SeqCst);
+        self.gate = gate.clone();
 
         let err_fn = |err| {
             error!("Audio input stream error: {}", err);
@@ -175,6 +251,8 @@ impl AudioRecorder {
                 let mut accumulator: Vec<i16> = Vec::with_capacity(CHUNK_SAMPLES);
                 let tx = tx.clone();
                 let dropped = dropped.clone();
+                let gate = gate.clone();
+                let stop_requested = stop_requested.clone();
                 device.build_input_stream(
                     &default_config.into(),
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
@@ -190,7 +268,7 @@ impl AudioRecorder {
                             let mono = frame.iter().sum::<f32>() / channels as f32;
                             resampler.push(mono, &mut accumulator);
                             sum_sq += mono * mono;
-                            emit_chunk(&mut accumulator, &tx, &dropped);
+                            emit_chunk(&mut accumulator, &tx, &dropped, &gate, &stop_requested);
                         }
                         if let Ok(mut amp) = current_amp.lock() {
                             *amp = (sum_sq / frames as f32).sqrt();
@@ -205,6 +283,8 @@ impl AudioRecorder {
                 let mut accumulator: Vec<i16> = Vec::with_capacity(CHUNK_SAMPLES);
                 let tx = tx.clone();
                 let dropped = dropped.clone();
+                let gate = gate.clone();
+                let stop_requested = stop_requested.clone();
                 device.build_input_stream(
                     &default_config.into(),
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
@@ -221,7 +301,7 @@ impl AudioRecorder {
                             let mono = (sum as f32 / channels as f32) / 32768.0;
                             resampler.push(mono, &mut accumulator);
                             sum_sq += mono * mono;
-                            emit_chunk(&mut accumulator, &tx, &dropped);
+                            emit_chunk(&mut accumulator, &tx, &dropped, &gate, &stop_requested);
                         }
                         if let Ok(mut amp) = current_amp.lock() {
                             *amp = (sum_sq / frames as f32).sqrt();
@@ -236,6 +316,8 @@ impl AudioRecorder {
                 let mut accumulator: Vec<i16> = Vec::with_capacity(CHUNK_SAMPLES);
                 let tx = tx.clone();
                 let dropped = dropped.clone();
+                let gate = gate.clone();
+                let stop_requested = stop_requested.clone();
                 device.build_input_stream(
                     &default_config.into(),
                     move |data: &[u16], _: &cpal::InputCallbackInfo| {
@@ -253,7 +335,7 @@ impl AudioRecorder {
                             let mono = (avg - 32768.0) / 32768.0;
                             resampler.push(mono, &mut accumulator);
                             sum_sq += mono * mono;
-                            emit_chunk(&mut accumulator, &tx, &dropped);
+                            emit_chunk(&mut accumulator, &tx, &dropped, &gate, &stop_requested);
                         }
                         if let Ok(mut amp) = current_amp.lock() {
                             *amp = (sum_sq / frames as f32).sqrt();

@@ -356,6 +356,7 @@ impl DictationSession {
             baseten_model,
             client_name,
             client_version,
+            gate_config,
         ) = {
             let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -372,6 +373,15 @@ impl DictationSession {
                 cfg.baseten_model_id.clone(),
                 cfg.client_name.clone(),
                 parse_client_version(&cfg.client_version),
+                wflow::vad::GateConfig {
+                    enabled: cfg.silence_filter,
+                    manual_threshold: None,
+                    // A higher sensitivity means a smaller margin above the
+                    // measured noise floor.
+                    margin: 0.02 - (cfg.silence_sensitivity.clamp(0.0, 1.0) * 0.019),
+                    pre_roll_ms: 250,
+                    stop_after_silence_ms: cfg.silence_stop_secs * 1000,
+                },
             )
         };
 
@@ -401,9 +411,18 @@ impl DictationSession {
         let dictionary_words = db.get_dictionary_words().unwrap_or_default();
         let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(200);
 
+        // Noise gate: only speech is forwarded to the speech-to-text provider.
+        let gate = if gate_config.enabled {
+            Some(Arc::new(Mutex::new(wflow::vad::VoiceGate::new(
+                gate_config,
+            ))))
+        } else {
+            None
+        };
+
         if let Err(e) = self
             .recorder
-            .start_recording(audio_tx, input_device.as_deref())
+            .start_recording(audio_tx, input_device.as_deref(), gate)
         {
             error!("Microphone start failed: {}", e);
             wflow::sound::play_sound(wflow::sound::SoundEffect::Error);
@@ -815,6 +834,56 @@ impl DictationSession {
             return;
         }
 
+        let (
+            ai_formatting,
+            writing_style,
+            groq_key,
+            llm_timeout_secs,
+            hallucination_guard,
+            autocorrect_enabled,
+            autocorrect_use_llm,
+            autocorrect_languages,
+            mixed_spacing,
+        ) = {
+            let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                cfg.ai_formatting,
+                cfg.writing_style.clone(),
+                cfg.groq_api_key.clone(),
+                cfg.stt_timeout_secs.clamp(3, 60),
+                cfg.hallucination_guard,
+                cfg.autocorrect_enabled,
+                cfg.autocorrect_use_llm,
+                cfg.autocorrect_languages
+                    .split(',')
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<String>>(),
+                cfg.mixed_spacing,
+            )
+        };
+
+        // 0. Guard against model hallucinations ("Thank you.", "(music)", a
+        //    word repeated 50 times). Such output must never be pasted.
+        if hallucination_guard {
+            let expected = wflow::quality::expected_languages(&language_code);
+            if let Some(reason) = wflow::quality::check_transcript(&transcribed_text, expected) {
+                info!(
+                    "Rejected transcript ({}): {:?}",
+                    reason.message(),
+                    transcribed_text
+                );
+                wflow::sound::play_sound(wflow::sound::SoundEffect::Error);
+                state.set_toast(&format!("🚫 {} — ไม่ได้แทรกข้อความลงในแอป", reason.message()));
+                if let Ok(mut lock) = state.status.lock() {
+                    *lock = DictationStatus::Error;
+                }
+                PlatformManager::set_hud_status(DictationStatus::Error);
+                schedule_hud_reset(state.clone(), 2500);
+                return;
+            }
+        }
+
         // 1. Custom snippets (trigger phrase -> replacement)
         let mut final_text = transcribed_text.clone();
         if let Ok(snippets) = db.get_snippets() {
@@ -825,29 +894,54 @@ impl DictationSession {
             }
         }
 
-        // 2. Optional LLM cleanup
-        let (ai_formatting, writing_style, groq_key, llm_timeout_secs) = {
-            let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
-            (
-                cfg.ai_formatting,
-                cfg.writing_style.clone(),
-                cfg.groq_api_key.clone(),
-                cfg.stt_timeout_secs.clamp(3, 60),
-            )
-        };
+        // 2. Offline spelling correction + mixed Thai/Latin spacing
+        if autocorrect_enabled {
+            final_text = wflow::spell::autocorrect_offline(
+                &final_text,
+                &autocorrect_languages,
+                mixed_spacing,
+            );
+        } else if mixed_spacing {
+            final_text = wflow::lang::collapse_duplicate_spaces(
+                &wflow::lang::normalize_mixed_spacing(&final_text),
+            );
+        }
 
-        if ai_formatting && !final_text.is_empty() {
+        // 3. Optional LLM pass: spelling correction and/or style formatting.
+        let llm_languages = wflow::spell::target_languages(&final_text, &autocorrect_languages);
+        let want_llm = (ai_formatting && writing_style != "raw")
+            || (autocorrect_use_llm && autocorrect_enabled);
+        if want_llm && !final_text.is_empty() {
             if let Some(ref key) = groq_key {
                 if !key.trim().is_empty() {
+                    let options = wflow::stt::PostProcess {
+                        style: if ai_formatting {
+                            writing_style.clone()
+                        } else {
+                            "raw".to_string()
+                        },
+                        languages: llm_languages.clone(),
+                        fix_spelling: autocorrect_enabled && autocorrect_use_llm,
+                        fix_mixed_spacing: mixed_spacing && autocorrect_use_llm,
+                    };
                     match wflow::stt::post_process_with_llm(
                         key,
                         &final_text,
-                        &writing_style,
+                        &options,
                         llm_timeout_secs,
                     )
                     .await
                     {
-                        Ok(cleaned) if !cleaned.trim().is_empty() => final_text = cleaned,
+                        Ok(cleaned) if !cleaned.trim().is_empty() => {
+                            // Keep the original if the model drifted away from it.
+                            match wflow::quality::check_llm_result(&final_text, &cleaned) {
+                                wflow::quality::LlmSanity::Good => final_text = cleaned,
+                                wflow::quality::LlmSanity::Drifted => {
+                                    warn!("LLM result drifted from the original; keeping it");
+                                    state.set_toast("โมเดลแก้ข้อความคลาดเคลื่อน จึงใช้ข้อความต้นฉบับ");
+                                }
+                            }
+                        }
                         Ok(_) => {}
                         Err(err) => warn!("LLM post-processing error: {}", err),
                     }
@@ -1171,6 +1265,14 @@ async fn run_background_coordinator(
                         *lock = amp;
                     }
                     PlatformManager::update_hud_amplitude(amp);
+
+                    // The noise gate can ask us to stop when the speaker went
+                    // quiet for a long time.
+                    if session.recorder.stop_requested() {
+                        warn!("Stopping after a long silence.");
+                        state.set_toast("หยุดอัตโนมัติ เพราะไม่มีเสียงพูด");
+                        session.finish(&state, &db).await;
+                    }
 
                     let max_secs = state
                         .config

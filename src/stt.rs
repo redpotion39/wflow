@@ -222,13 +222,38 @@ struct ChatResponseMessage {
     content: String,
 }
 
+/// What the language model should do with the transcript.
+#[derive(Debug, Clone)]
+pub struct PostProcess {
+    /// Writing style ("smart_cleanup", "casual", …).
+    pub style: String,
+    /// Language codes that should be spell-checked.
+    pub languages: Vec<String>,
+    /// Ask the model to fix spelling mistakes.
+    pub fix_spelling: bool,
+    /// Ask the model to insert missing spaces between Thai and Latin words.
+    pub fix_mixed_spacing: bool,
+}
+
+impl Default for PostProcess {
+    fn default() -> Self {
+        Self {
+            style: "raw".to_string(),
+            languages: Vec::new(),
+            fix_spelling: false,
+            fix_mixed_spacing: false,
+        }
+    }
+}
+
 /// Polishes and formats raw transcribed text using Groq's Llama 3.1 8B (~150 ms).
 pub async fn post_process_with_llm(
     api_key: &str,
     raw_text: &str,
-    style: &str,
+    options: &PostProcess,
     timeout_secs: u64,
 ) -> Result<String> {
+    let style = options.style.as_str();
     if api_key.trim().is_empty() || raw_text.trim().is_empty() || style == "raw" {
         return Ok(raw_text.to_string());
     }
@@ -261,9 +286,34 @@ pub async fn post_process_with_llm(
         _ => return Ok(raw_text.to_string()),
     };
 
+    // Spelling / mixed-language instructions are appended to the style prompt so
+    // a single request covers both jobs.
+    let system_prompt = if options.fix_spelling || options.fix_mixed_spacing {
+        let mut prompt = system_prompt.to_string();
+        if options.fix_spelling {
+            let languages = if options.languages.is_empty() {
+                "the language(s) of the text".to_string()
+            } else {
+                options.languages.join(", ")
+            };
+            prompt.push_str(&format!(
+                " Also fix spelling mistakes in {}. Only correct clear misspellings — never change the meaning, never translate, and never rewrite the words. Keep every original word.",
+                languages
+            ));
+        }
+        if options.fix_mixed_spacing {
+            prompt.push_str(
+                " If the text mixes Thai and Latin words without a space between them, insert the missing space.",
+            );
+        }
+        prompt
+    } else {
+        system_prompt.to_string()
+    };
+
     info!(
-        "Running AI Smart Formatting with style '{}' on Groq Llama 3.1 8B...",
-        style
+        "Running AI post-processing (style: {}, spell: {}, mixed: {}) on Groq Llama 3.1 8B...",
+        style, options.fix_spelling, options.fix_mixed_spacing
     );
 
     let client = crate::http::client();

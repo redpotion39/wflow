@@ -188,6 +188,31 @@ pub struct AppConfig {
     /// Network timeout for speech-to-text requests, in seconds.
     #[serde(default = "default_stt_timeout_secs")]
     pub stt_timeout_secs: u64,
+    /// Filter out silence and background noise while dictating.
+    #[serde(default = "default_true")]
+    pub silence_filter: bool,
+    /// Extra head-room above the measured noise floor (0.0 - 1.0). Lower
+    /// values are more sensitive.
+    #[serde(default = "default_silence_sensitivity")]
+    pub silence_sensitivity: f32,
+    /// Stop recording after this much continuous silence (0 = never).
+    #[serde(default = "default_silence_stop_secs")]
+    pub silence_stop_secs: u64,
+    /// Reject transcripts that look like model hallucinations.
+    #[serde(default = "default_true")]
+    pub hallucination_guard: bool,
+    /// Correct spelling with the offline dictionary.
+    #[serde(default = "default_true")]
+    pub autocorrect_enabled: bool,
+    /// Also correct spelling with the language model.
+    #[serde(default = "default_true")]
+    pub autocorrect_use_llm: bool,
+    /// Comma separated language codes to correct ("th,en"). Empty = auto.
+    #[serde(default)]
+    pub autocorrect_languages: String,
+    /// Insert the missing space between Thai and Latin words.
+    #[serde(default = "default_true")]
+    pub mixed_spacing: bool,
     /// Client name announced to the gRPC backend.
     #[serde(default = "default_client_name")]
     pub client_name: String,
@@ -204,6 +229,12 @@ fn default_update_interval() -> u64 {
 }
 fn default_max_recording_secs() -> u64 {
     300
+}
+fn default_silence_sensitivity() -> f32 {
+    0.5
+}
+fn default_silence_stop_secs() -> u64 {
+    0
 }
 fn default_stt_timeout_secs() -> u64 {
     30
@@ -305,6 +336,14 @@ impl Default for AppConfig {
             skipped_update_version: None,
             max_recording_secs: default_max_recording_secs(),
             stt_timeout_secs: default_stt_timeout_secs(),
+            silence_filter: true,
+            silence_sensitivity: default_silence_sensitivity(),
+            silence_stop_secs: default_silence_stop_secs(),
+            hallucination_guard: true,
+            autocorrect_enabled: true,
+            autocorrect_use_llm: true,
+            autocorrect_languages: String::new(),
+            mixed_spacing: true,
             client_name: default_client_name(),
             client_version: default_client_version(),
         }

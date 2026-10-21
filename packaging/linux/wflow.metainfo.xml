@@ -51,6 +51,18 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.0" date="2026-10-22">
+      <description>
+        <p>Voice quality release:</p>
+        <ul>
+          <li>Silence filter / noise gate: only speech is sent to the model</li>
+          <li>Hallucination guard: blocks "Thank you.", "(music)" and other model garbage</li>
+          <li>Per-language automatic spell check (offline dictionary + LLM)</li>
+          <li>Mixed Thai/Latin spacing is fixed automatically</li>
+          <li>Live voice-activity indicator in the studio</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.2" date="2026-10-22">
       <description>
         <p>Update experience release:</p>

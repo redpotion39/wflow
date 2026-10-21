@@ -41,6 +41,23 @@ executable replaces the 400 MB Electron client — typical idle memory is around
 - **Auto-paste** through the clipboard plus synthetic `Ctrl+V`, with a
   configurable safety limit on recording length.
 
+### 🎚️ Voice quality
+
+- **Silence filter (noise gate)** — the ambient noise floor is measured while
+  you dictate and only chunks that are clearly speech are sent to the
+  provider. A short pre-roll buffer keeps the first syllable intact, and the
+  recording can stop automatically after a long silence. The studio shows a
+  live voice-activity indicator.
+- **Hallucination guard** — speech models happily invent "Thank you.",
+  "(upbeat music)" or repeat one word fifty times when they are fed noise.
+  Every transcript is validated before it is inserted, so model garbage never
+  ends up in your editor.
+- **Per-language spell check** — an offline dictionary fixes the common
+  misspellings of each language, and the language model can take it further
+  when a Groq key is configured.
+- **Mixed Thai/Latin handling** — `ทดสอบAPI` becomes `ทดสอบ API`, and each word
+  is spell-checked with the dictionary of its own script.
+
 ### AI post-processing (optional)
 
 Raw transcripts can be polished by Groq's `llama-3.1-8b-instant` with one of
@@ -216,14 +233,18 @@ wflow/
 │   ├── gui.rs               # egui studio, history, dictionary, settings
 │   ├── http.rs              # Shared HTTP client + retry policy
 │   ├── instance.rs          # Single-instance lock
+│   ├── lang.rs              # Script detection & mixed-language spacing
 │   ├── paths.rs             # Per-user directories
+│   ├── quality.rs           # Hallucination / model-garbage guard
 │   ├── proto.rs             # prost messages for flow_api.v1
 │   ├── secrets.rs           # 0600 secrets file
 │   ├── sound.rs             # Synthesised earcons
+│   ├── spell.rs             # Per-language offline spell dictionary
 │   ├── stt.rs               # Groq / ElevenLabs HTTP clients + LLM cleanup
 │   ├── text.rs              # Shared text helpers
 │   ├── thai.rs              # Thai typography normalisation
 │   ├── ui.rs                # Dictation status definitions
+│   ├── vad.rs               # Voice activity detection (silence filter)
 │   ├── update.rs            # GitHub release update checker
 │   └── platform/
 │       ├── mod.rs           # Cross-platform interface
