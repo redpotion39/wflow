@@ -521,8 +521,8 @@ impl DictationSession {
                             break;
                         };
                         if let Ok(mut buf) = samples.lock() {
-                            for p in chunk.chunks_exact(2) {
-                                buf.push(i16::from_le_bytes([p[0], p[1]]));
+                            for pair in chunk.as_chunks::<2>().0 {
+                                buf.push(i16::from_le_bytes(*pair));
                             }
                         }
 
@@ -607,8 +607,8 @@ impl DictationSession {
                             break;
                         };
                         if let Ok(mut buf) = samples.lock() {
-                            for p in chunk.chunks_exact(2) {
-                                buf.push(i16::from_le_bytes([p[0], p[1]]));
+                            for pair in chunk.as_chunks::<2>().0 {
+                                buf.push(i16::from_le_bytes(*pair));
                             }
                         }
                     }
