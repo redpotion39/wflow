@@ -71,6 +71,7 @@ pub enum HotkeyEvent {
     QuitApp,
     KeyRecorded(u8, KeyCombo), // mode (1=Dictate, 2=ToggleWindow), combo
     AutostartToggled(bool),
+    CheckUpdate,
 }
 
 // Global hook callback state
@@ -925,6 +926,12 @@ unsafe extern "system" fn tray_wnd_proc(
                 );
                 let _ = AppendMenuW(hmenu, MF_STRING, 2, windows::core::w!("Hide to Tray"));
                 let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
+                let _ = AppendMenuW(
+                    hmenu,
+                    MF_STRING,
+                    5,
+                    windows::core::w!("Check for Updates\u{2713}"),
+                );
 
                 let is_autostart = PlatformManager::is_autostart_enabled();
                 let autostart_str = if is_autostart {
@@ -972,6 +979,12 @@ unsafe extern "system" fn tray_wnd_proc(
                         }
                     }
                     let _ = PostQuitMessage(0);
+                } else if cmd.0 == 5 {
+                    if let Ok(guard) = HOOK_TX.lock() {
+                        if let Some(tx) = guard.as_ref() {
+                            let _ = tx.send(HotkeyEvent::CheckUpdate);
+                        }
+                    }
                 } else if cmd.0 == 4 {
                     let new_state = !PlatformManager::is_autostart_enabled();
                     let _ = PlatformManager::set_autostart(new_state);

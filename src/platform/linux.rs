@@ -64,6 +64,7 @@ impl ksni::Tray for WflowTray {
         let tx1 = self.tx.clone();
         let tx2 = self.tx.clone();
         let tx3 = self.tx.clone();
+        let tx4 = self.tx.clone();
         let is_rec = self.is_recording;
 
         vec![
@@ -94,6 +95,16 @@ impl ksni::Tray for WflowTray {
                     } else {
                         let _ = tx2.send(HotkeyEvent::Pressed);
                     }
+                }),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            StandardItem {
+                label: "🔄 ตรวจสอบอัปเดต (Check for Updates)".into(),
+                icon_name: "emblem-system-software-update".into(),
+                activate: Box::new(move |_| {
+                    let _ = tx4.send(HotkeyEvent::CheckUpdate);
                 }),
                 ..Default::default()
             }
@@ -133,6 +144,7 @@ pub enum HotkeyEvent {
     QuitApp,
     KeyRecorded(u8, KeyCombo),
     AutostartToggled(bool),
+    CheckUpdate,
 }
 
 static RECORDING_MODE: Mutex<Option<u8>> = Mutex::new(None);

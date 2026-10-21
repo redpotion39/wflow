@@ -965,6 +965,7 @@ async fn run_background_coordinator(
     gui_rx: &mut mpsc::UnboundedReceiver<GuiEvent>,
 ) {
     let mut session = DictationSession::new();
+    let mut last_update_probe = Duration::ZERO;
 
     loop {
         tokio::select! {
@@ -1028,6 +1029,17 @@ async fn run_background_coordinator(
                         } else {
                             "Auto-start disabled"
                         });
+                        request_repaint(&state);
+                    }
+                    Some(HotkeyEvent::CheckUpdate) => {
+                        info!("Update check requested from the tray menu.");
+                        let include_prerelease = state
+                            .config
+                            .lock()
+                            .map(|c| c.include_prerelease)
+                            .unwrap_or(false);
+                        spawn_update_check(state.clone(), include_prerelease);
+                        state.set_toast("กำลังตรวจสอบอัปเดต...");
                         request_repaint(&state);
                     }
                     Some(HotkeyEvent::QuitApp) => {
@@ -1134,6 +1146,25 @@ async fn run_background_coordinator(
             }
 
             _ = tokio::time::sleep(TICK_INTERVAL) => {
+                // Re-check for updates periodically so a long-running session
+                // still learns about new releases.
+                last_update_probe += TICK_INTERVAL;
+                if last_update_probe >= Duration::from_secs(15 * 60) {
+                    last_update_probe = Duration::ZERO;
+                    let (enabled, interval, prerelease, last_check) = {
+                        let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+                        (
+                            cfg.check_updates,
+                            cfg.update_check_interval_hours,
+                            cfg.include_prerelease,
+                            cfg.last_update_check.clone(),
+                        )
+                    };
+                    if enabled && wflow::update::should_check(last_check.as_deref(), interval) {
+                        spawn_update_check(state.clone(), prerelease);
+                    }
+                }
+
                 if session.is_active() {
                     let amp = session.recorder.get_amplitude();
                     if let Ok(mut lock) = state.current_amplitude.lock() {

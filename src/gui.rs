@@ -161,6 +161,8 @@ pub struct WisprFlowGui {
     window_icon_applied: bool,
     show_exit_confirmation: bool,
     stt_test_status: Arc<Mutex<Option<Result<String, String>>>>,
+    /// Last update payload the GUI has rendered, used to detect changes.
+    last_seen_update: Option<UpdateInfo>,
     stt_test_in_progress: Arc<AtomicBool>,
 }
 
@@ -329,6 +331,7 @@ impl WisprFlowGui {
             show_exit_confirmation: false,
             stt_test_status: Arc::new(Mutex::new(None)),
             stt_test_in_progress: Arc::new(AtomicBool::new(false)),
+            last_seen_update: None,
         }
     }
 
@@ -774,6 +777,17 @@ impl eframe::App for WisprFlowGui {
             ctx.request_repaint();
         }
 
+        // Keep the update button in sync with the background checker: repaint
+        // while a check is running and whenever the result changes.
+        if self.state.update_check_running.load(Ordering::SeqCst) {
+            ctx.request_repaint();
+        }
+        let current_update = lock(&self.state.update_info).clone();
+        if current_update != self.last_seen_update {
+            self.last_seen_update = current_update;
+            ctx.request_repaint();
+        }
+
         // In-window hotkey trigger (mirrors the configured global hotkey)
         let hotkey_vk = self
             .state
@@ -845,6 +859,41 @@ impl eframe::App for WisprFlowGui {
         #[cfg(not(target_os = "windows"))]
         self.render_floating_hud(ctx, status, amplitude);
     }
+}
+
+/// Visual state of the "update" button in the top bar.
+///
+/// Returns the label plus the fill / stroke / text colours.
+fn update_button_style(
+    latest: Option<&str>,
+    running: bool,
+    current_version: &str,
+    animation_time: f32,
+) -> (String, Color32, Color32, Color32) {
+    if let Some(latest) = latest {
+        // Gentle pulse so the action is impossible to miss.
+        let pulse = 0.5 + 0.5 * (animation_time * 3.0).sin();
+        return (
+            format!("⬆️  อัปเดตใหม่ v{}", latest),
+            Color32::from_rgb(22, 163, 74),
+            Color32::from_rgb(74, 222, 128).gamma_multiply(0.65 + 0.35 * pulse),
+            Color32::WHITE,
+        );
+    }
+    if running {
+        return (
+            "⏳  กำลังตรวจสอบ...".to_string(),
+            Color32::from_rgb(30, 41, 59),
+            Color32::from_rgb(100, 116, 139),
+            Color32::from_rgb(203, 213, 225),
+        );
+    }
+    (
+        format!("🔄  อัปเดต · v{}", current_version),
+        Color32::from_rgb(30, 41, 59),
+        Color32::from_rgb(71, 85, 105),
+        Color32::from_rgb(203, 213, 225),
+    )
 }
 
 /// Maps a Windows virtual-key code to an egui key for the in-window shortcut.
@@ -1222,6 +1271,67 @@ impl WisprFlowGui {
                                 },
                             );
                         });
+
+                        ui.add_space(4.0);
+
+                        let pending = self.pending_update();
+                        let pending_download = pending.as_ref().map(|i| i.download_url.clone());
+                        let pending_latest = pending.as_ref().map(|i| i.latest.to_string());
+                        let (version_text, version_color) = match pending_latest.as_ref() {
+                            Some(latest) => (
+                                format!("v{} ⬆️ v{}", crate::update::current_version(), latest),
+                                Color32::from_rgb(74, 222, 128),
+                            ),
+                            None => (
+                                format!("v{}", crate::update::current_version()),
+                                Color32::from_rgb(203, 213, 225),
+                            ),
+                        };
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("VERSION")
+                                    .font(FontId::proportional(9.0))
+                                    .color(Color32::from_rgb(148, 163, 184)),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let galley = ui.painter().layout_no_wrap(
+                                        version_text.clone(),
+                                        FontId::monospace(10.5),
+                                        version_color,
+                                    );
+                                    let (rect, response) =
+                                        ui.allocate_exact_size(galley.size(), Sense::click());
+                                    ui.painter().text(
+                                        rect.min,
+                                        egui::Align2::LEFT_TOP,
+                                        &version_text,
+                                        FontId::monospace(10.5),
+                                        version_color,
+                                    );
+                                    if response.clicked() {
+                                        if let (Some(url), Some(latest)) =
+                                            (pending_download.as_ref(), pending_latest.as_ref())
+                                        {
+                                            let _ =
+                                                self.event_tx.send(GuiEvent::OpenUrl(url.clone()));
+                                            self.state.set_toast(&format!(
+                                                "กำลังเปิดหน้าดาวน์โหลด v{}",
+                                                latest
+                                            ));
+                                        } else {
+                                            let _ = self.event_tx.send(GuiEvent::CheckUpdate);
+                                            self.state.set_toast("กำลังตรวจสอบอัปเดต...");
+                                        }
+                                    }
+                                    if response.hovered() {
+                                        response.show_tooltip_text("คลิกเพื่อตรวจสอบ/ดาวน์โหลดอัปเดต");
+                                    }
+                                },
+                            );
+                        });
                     });
 
                 ui.add_space(8.0);
@@ -1272,6 +1382,56 @@ impl WisprFlowGui {
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Update button: always visible, highlights when a new release exists.
+                let update_available = self.pending_update();
+                let update_running = self.state.update_check_running.load(Ordering::SeqCst);
+                let current_version = crate::update::current_version().to_string();
+
+                let (update_label, update_fill, update_stroke, update_text) = update_button_style(
+                    update_available
+                        .as_ref()
+                        .map(|i| i.latest.to_string())
+                        .as_deref(),
+                    update_running,
+                    &current_version,
+                    self.animation_time,
+                );
+
+                let update_btn = egui::Button::new(
+                    egui::RichText::new(shape_thai(&update_label))
+                        .font(FontId::proportional(12.0))
+                        .color(update_text)
+                        .strong(),
+                )
+                .fill(update_fill)
+                .stroke(Stroke::new(1.2_f32, update_stroke))
+                .rounding(Rounding::same(8.0));
+
+                let update_response = ui.add_enabled(!update_running, update_btn);
+                if update_response.clicked() {
+                    if let Some(info) = update_available.as_ref() {
+                        // Open the platform-appropriate download in the browser.
+                        let _ = self
+                            .event_tx
+                            .send(GuiEvent::OpenUrl(info.download_url.clone()));
+                        self.state
+                            .set_toast(&format!("กำลังเปิดหน้าดาวน์โหลด v{}", info.latest));
+                    } else {
+                        let _ = self.event_tx.send(GuiEvent::CheckUpdate);
+                        self.state.set_toast("กำลังตรวจสอบอัปเดต...");
+                    }
+                }
+                if update_response.hovered() {
+                    let tip = if update_available.is_some() {
+                        "คลิกเพื่อดาวน์โหลดเวอร์ชันใหม่"
+                    } else {
+                        "คลิกเพื่อตรวจสอบอัปเดต"
+                    };
+                    update_response.show_tooltip_text(tip);
+                }
+
+                ui.add_space(8.0);
+
                 // Quick Dictate Action Button
                 let quick_btn = if is_rec {
                     egui::Button::new(
@@ -1337,21 +1497,29 @@ impl WisprFlowGui {
                     ),
                 };
 
-                let status_pill = ui.label(
-                    egui::RichText::new(status_text)
-                        .font(FontId::proportional(12.0))
-                        .color(Color32::WHITE)
-                        .strong(),
+                // Paint the pill background first, then the text on top of it.
+                let status_galley = ui.painter().layout_no_wrap(
+                    status_text.clone(),
+                    FontId::proportional(12.0),
+                    Color32::WHITE,
                 );
-                ui.painter().rect_filled(
-                    status_pill.rect.expand(5.0),
-                    Rounding::same(12.0),
-                    bg_color,
+                let (status_rect, _) = ui.allocate_exact_size(
+                    status_galley.size() + egui::vec2(20.0, 12.0),
+                    Sense::hover(),
                 );
+                ui.painter()
+                    .rect_filled(status_rect, Rounding::same(12.0), bg_color);
                 ui.painter().rect_stroke(
-                    status_pill.rect.expand(5.0),
+                    status_rect,
                     Rounding::same(12.0),
                     Stroke::new(1.0_f32, border_color),
+                );
+                ui.painter().text(
+                    status_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    status_text,
+                    FontId::proportional(12.0),
+                    Color32::WHITE,
                 );
 
                 ui.add_space(8.0);
@@ -1363,20 +1531,32 @@ impl WisprFlowGui {
                     active_app.process_name.clone()
                 };
 
-                let ctx_pill = ui.label(
-                    egui::RichText::new(format!("🎯 Focus: {}", app_display))
-                        .font(FontId::proportional(11.5))
-                        .color(Color32::from_rgb(148, 163, 184)),
+                let ctx_label = format!("🎯 Focus: {}", app_display);
+                let ctx_galley = ui.painter().layout_no_wrap(
+                    ctx_label.clone(),
+                    FontId::proportional(11.5),
+                    Color32::from_rgb(148, 163, 184),
+                );
+                let (ctx_rect, _) = ui.allocate_exact_size(
+                    ctx_galley.size() + egui::vec2(16.0, 10.0),
+                    Sense::hover(),
                 );
                 ui.painter().rect_filled(
-                    ctx_pill.rect.expand(4.0),
+                    ctx_rect,
                     Rounding::same(8.0),
                     Color32::from_rgb(22, 29, 44),
                 );
                 ui.painter().rect_stroke(
-                    ctx_pill.rect.expand(4.0),
+                    ctx_rect,
                     Rounding::same(8.0),
                     Stroke::new(1.0_f32, Color32::from_rgb(38, 50, 74)),
+                );
+                ui.painter().text(
+                    ctx_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    ctx_label,
+                    FontId::proportional(11.5),
+                    Color32::from_rgb(148, 163, 184),
                 );
             });
         });
@@ -3371,28 +3551,28 @@ impl WisprFlowGui {
         });
     }
 
-    fn render_update_banner(&self, ui: &mut egui::Ui) {
-        let info = self
-            .state
-            .update_info
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone());
+    /// Returns the pending update when it is newer than the running build and
+    /// has not been skipped by the user.
+    fn pending_update(&self) -> Option<UpdateInfo> {
+        let info = lock(&self.state.update_info).clone()?;
+        if !info.is_newer() {
+            return None;
+        }
+        let latest = info.latest.to_string();
+        let skipped =
+            lock(&self.state.config).skipped_update_version.as_deref() == Some(latest.as_str());
+        if skipped {
+            return None;
+        }
+        Some(info)
+    }
 
-        let Some(info) = info else {
+    fn render_update_banner(&self, ui: &mut egui::Ui) {
+        let Some(info) = self.pending_update() else {
             return;
         };
 
         let latest = info.latest.to_string();
-        let skipped = self
-            .state
-            .config
-            .lock()
-            .map(|cfg| cfg.skipped_update_version.as_deref() == Some(latest.as_str()))
-            .unwrap_or(false);
-        if skipped || !info.is_newer() {
-            return;
-        }
 
         ui.add_space(10.0);
         egui::Frame::none()
@@ -3765,5 +3945,31 @@ impl WisprFlowGui {
         } else if close_modal {
             self.show_exit_confirmation = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_button_is_always_labelled() {
+        let (label, _, _, _) = update_button_style(None, false, "0.2.1", 0.0);
+        assert!(label.contains("อัปเดต"), "idle label: {}", label);
+        assert!(label.contains("0.2.1"), "idle label: {}", label);
+    }
+
+    #[test]
+    fn update_button_highlights_a_new_release() {
+        let (label, fill, _, text) = update_button_style(Some("0.3.0"), false, "0.2.1", 0.0);
+        assert!(label.contains("0.3.0"), "label: {}", label);
+        assert_eq!(fill, Color32::from_rgb(22, 163, 74));
+        assert_eq!(text, Color32::WHITE);
+    }
+
+    #[test]
+    fn update_button_shows_progress() {
+        let (label, _, _, _) = update_button_style(None, true, "0.2.1", 0.0);
+        assert!(label.contains("กำลังตรวจสอบ"), "label: {}", label);
     }
 }

@@ -48,6 +48,7 @@ pub mod mock {
         QuitApp,
         KeyRecorded(u8, crate::config::KeyCombo),
         AutostartToggled(bool),
+        CheckUpdate,
     }
 
     pub struct PlatformManager;

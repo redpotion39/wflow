@@ -51,6 +51,18 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.2" date="2026-10-22">
+      <description>
+        <p>Update experience release:</p>
+        <ul>
+          <li>A visible update button in the top bar, on every tab</li>
+          <li>Clickable version indicator in the sidebar</li>
+          <li>"Check for updates" entry in the system tray menu</li>
+          <li>Periodic background update checks while the app is running</li>
+          <li>Fixed the status and focus pills painting over their own text</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-10-22">
       <description>
         <p>Maintenance release:</p>
