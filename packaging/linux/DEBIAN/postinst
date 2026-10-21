@@ -9,4 +9,17 @@ if which gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
 fi
 
+# A copy in ~/.local/bin takes precedence over /usr/bin for most users, so an
+# older installation there would shadow this package and the app would keep
+# running the previous version. Point it at the packaged binary.
+if [ -x "$HOME/.local/bin/wflow" ]; then
+    if ! cmp -s /usr/bin/wflow "$HOME/.local/bin/wflow"; then
+        echo "wflow: replacing the older copy in ~/.local/bin/wflow with the packaged one"
+        cp /usr/bin/wflow "$HOME/.local/bin/wflow" 2>/dev/null || true
+    fi
+    if [ -f "$HOME/.local/share/applications/wflow.desktop" ]; then
+        sed -i 's|^Exec=.*|Exec=/usr/bin/wflow|' "$HOME/.local/share/applications/wflow.desktop" 2>/dev/null || true
+    fi
+fi
+
 exit 0

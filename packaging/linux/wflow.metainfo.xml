@@ -51,6 +51,15 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.3" date="2026-10-22">
+      <description>
+        <p>Installer fix:</p>
+        <ul>
+          <li>The .deb now replaces a stale ~/.local/bin/wflow that would shadow the packaged binary</li>
+          <li>install.sh reports and replaces conflicting installations</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.2" date="2026-10-22">
       <description>
         <p>Update discoverability:</p>

@@ -145,6 +145,24 @@ bash packaging/linux/build-all.sh
 
 Outputs land in `dist/`: a `.deb`, a `.run` installer and a `.tar.gz` bundle.
 
+### Upgrading on Linux
+
+`~/.local/bin` usually comes **before** `/usr/bin` in `PATH`. If an older
+copy is left over from a previous `install.sh --user` run, it silently shadows
+the packaged binary and the app keeps starting the old version.
+
+Both installers handle this for you:
+
+- `install.sh` reports every other copy it finds and replaces the ones it can.
+- The `.deb` post-install script repoints `~/.local/bin/wflow` at the
+  packaged binary.
+
+To check which build is actually running:
+
+```bash
+wflow --version
+```
+
 ### Requirements
 
 * Windows 10/11 x64, or a 64-bit Linux distribution

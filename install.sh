@@ -143,6 +143,24 @@ install -d "$BIN_DIR"
 install -m 755 "$SRC_BIN" "$BIN_DIR/wflow"
 strip --strip-unneeded "$BIN_DIR/wflow" 2>/dev/null || true
 
+# 1b. Warn about other installations that would shadow this one.
+#     A stale copy in ~/.local/bin wins over /usr/bin for most users, which
+#     makes it look like the update never arrived.
+echo ">> Checking for conflicting installations..."
+for other in "$HOME/.local/bin/wflow" "/usr/local/bin/wflow" "/usr/bin/wflow"; do
+    [ "$other" = "$BIN_DIR/wflow" ] && continue
+    [ -x "$other" ] || continue
+    other_version="$("$other" --version 2>/dev/null | grep -v INFO | tail -1 || true)"
+    echo "   ⚠️  Found another installation: $other ${other_version}"
+    if [ "$MODE" = "user" ] && [ -w "$other" ]; then
+        echo "       Replacing it with this version so the newer build is used."
+        install -m 755 "$SRC_BIN" "$other" 2>/dev/null || true
+    else
+        echo "       It may take precedence over this one on your PATH."
+        echo "       Remove it with: sudo rm -f $other"
+    fi
+done
+
 if [ -n "$SRC_ICON" ]; then
     echo ">> Installing application icons..."
     install -d "$ICON_DIR"
