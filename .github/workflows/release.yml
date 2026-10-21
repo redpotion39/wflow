@@ -13,9 +13,11 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build & Publish
+  linux:
+    name: Build Linux packages
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -42,6 +44,11 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Read version
+        id: version
+        run: |
+          echo "version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
 
       - name: Build all Linux packages
         run: bash packaging/linux/build-all.sh
@@ -70,19 +77,93 @@ jobs:
           name: wflow-linux-tarball
           path: dist/*.tar.gz
 
+      - name: Upload Checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: wflow-checksums
+          path: dist/SHA256SUMS.txt
+
+  windows:
+    name: Build Windows installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Install Inno Setup
+        uses: crazy-max/ghaction-chocolatey@v3
+        with:
+          packages: innosetup
+
+      - name: Compile Setup.exe
+        shell: cmd
+        run: |
+          set PATH=C:\Program Files (x86)\Inno Setup 6;%PATH%
+          iscc installer.iss
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item dist\Wflow-Setup-*.exe dist\ -ErrorAction SilentlyContinue
+          Get-ChildItem dist
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: wflow-windows-setup
+          path: dist/*.exe
+
+  publish:
+    name: Publish GitHub Release
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.deb
-            dist/*.run
-            dist/*.tar.gz
-            dist/SHA256SUMS.txt
+            artifacts/*.deb
+            artifacts/*.run
+            artifacts/*.tar.gz
+            artifacts/*.exe
+            artifacts/SHA256SUMS.txt
           generate_release_notes: true
+          fail_on_unmatched_files: false
           body: |
             ## Verification
 
             ```bash
             sha256sum -c SHA256SUMS.txt
             ```
+
+            The checksum file covers the Linux artifacts. Verify the Windows
+            installer with `Get-FileHash Wflow-Setup-<version>.exe -Algorithm SHA256`.
