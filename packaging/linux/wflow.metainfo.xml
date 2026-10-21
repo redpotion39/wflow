@@ -51,6 +51,16 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.1" date="2026-10-22">
+      <description>
+        <p>Never transcribe silence:</p>
+        <ul>
+          <li>Nothing is sent to the provider when the noise gate heard no speech</li>
+          <li>The gRPC session is only opened once real speech has been captured</li>
+          <li>A clear message explains why nothing was inserted</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-10-22">
       <description>
         <p>Voice quality release:</p>

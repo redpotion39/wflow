@@ -48,6 +48,10 @@ executable replaces the 400 MB Electron client — typical idle memory is around
   provider. A short pre-roll buffer keeps the first syllable intact, and the
   recording can stop automatically after a long silence. The studio shows a
   live voice-activity indicator.
+- **A recording without speech never reaches the provider.** The gRPC session
+  is only opened once the gate has captured real speech, so a silent take
+  costs no request, no upload and — most importantly — no chance of a
+  hallucinated transcript.
 - **Hallucination guard** — speech models happily invent "Thank you.",
   "(upbeat music)" or repeat one word fifty times when they are fed noise.
   Every transcript is validated before it is inserted, so model garbage never

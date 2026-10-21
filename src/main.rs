@@ -490,7 +490,7 @@ impl DictationSession {
                     payload: None,
                     commit: Commit::Unspecified as i32,
                 };
-                let _ = grpc_req_tx.send(init_req).await;
+                // (sent later, once speech has been detected)
 
                 // Privacy: only send clipboard-like context when the user opted in.
                 let (before_text, selected_text, after_text, full_text) = if share_context {
@@ -529,12 +529,19 @@ impl DictationSession {
                     payload: None,
                     commit: Commit::Unspecified as i32,
                 };
-                let _ = grpc_req_tx.send(context_req).await;
+                // (sent later, once speech has been detected)
 
+                // The Init/Context messages are only sent once the noise gate
+                // has forwarded the first chunk of speech, so a recording that
+                // contains nothing but silence never opens a session with the
+                // backend.
                 let bridge_tx = grpc_req_tx.clone();
                 let is_dictating = Arc::clone(&self.is_dictating);
                 let samples = Arc::clone(&self.samples);
+                let (speech_tx, speech_rx) = tokio::sync::oneshot::channel::<()>();
+                let speech_tx = std::sync::Mutex::new(Some(speech_tx));
                 tokio::spawn(async move {
+                    let mut started = false;
                     while is_dictating.load(Ordering::SeqCst) {
                         let Some(chunk) = audio_rx.recv().await else {
                             break;
@@ -542,6 +549,19 @@ impl DictationSession {
                         if let Ok(mut buf) = samples.lock() {
                             for pair in chunk.as_chunks::<2>().0 {
                                 buf.push(i16::from_le_bytes(*pair));
+                            }
+                        }
+
+                        if !started {
+                            started = true;
+                            let _ = bridge_tx.send(init_req.clone()).await;
+                            let _ = bridge_tx.send(context_req.clone()).await;
+                            // Tell the gRPC task that there is something to
+                            // transcribe; until then it stays offline.
+                            if let Ok(mut slot) = speech_tx.lock() {
+                                if let Some(tx) = slot.take() {
+                                    let _ = tx.send(());
+                                }
                             }
                         }
 
@@ -562,6 +582,8 @@ impl DictationSession {
                 });
 
                 let handle = tokio::spawn(async move {
+                    // Wait for the first chunk of speech before connecting.
+                    let _ = speech_rx.await;
                     match FlowGrpcClient::connect(&endpoint_url).await {
                         Ok(mut client) => {
                             let stream = tokio_stream::wrappers::ReceiverStream::new(grpc_req_rx);
@@ -662,6 +684,7 @@ impl DictationSession {
             auto_paste,
             store_textbox_contents,
             stt_timeout_secs,
+            silence_filter,
         ) = {
             let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -674,8 +697,36 @@ impl DictationSession {
                 cfg.auto_paste,
                 cfg.store_textbox_contents,
                 cfg.stt_timeout_secs,
+                cfg.silence_filter,
             )
         };
+
+        // The noise gate knows whether anything was actually said. If not, the
+        // backend is never contacted at all — no upload, no gRPC session, no
+        // request, and therefore no chance of a hallucinated transcript.
+        let speech_ms = self.recorder.detected_speech_ms();
+        if !should_transcribe(silence_filter, speech_ms) {
+            info!("Noise gate detected no speech; skipping the transcription entirely.");
+            if let Some(handle) = self.response_handle.take() {
+                handle.abort();
+            }
+            self.request_tx = None;
+            self.samples
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+
+            wflow::sound::play_sound(wflow::sound::SoundEffect::Error);
+            state
+                .set_toast("ไม่ได้ยินเสียงพูด — ไม่ได้ส่งให้โมเดลประมวลผล (เพิ่มความไวต่อเสียงพูดได้ใน Settings)");
+            if let Ok(mut lock) = state.status.lock() {
+                *lock = DictationStatus::Idle;
+            }
+            PlatformManager::set_hud_status(DictationStatus::Idle);
+            PlatformManager::hide_floating_hud();
+            schedule_hud_reset(state.clone(), 400);
+            return;
+        }
 
         let transcription_start = Instant::now();
         let mut result_text: Option<String> = None;
@@ -826,6 +877,8 @@ impl DictationSession {
         };
 
         if transcribed_text.is_empty() {
+            info!("The model returned no text for a session with {speech_ms} ms of speech.");
+            state.set_toast("ไม่ได้ยินเสียงพูดที่ชัดเจน — ไม่ได้แทรกข้อความ");
             if let Ok(mut lock) = state.status.lock() {
                 *lock = DictationStatus::Done;
             }
@@ -1033,6 +1086,15 @@ fn client_platform() -> Platform {
     {
         Platform::Api
     }
+}
+
+/// Decides whether a recording has to be sent to the speech-to-text backend.
+///
+/// With the silence filter enabled a recording in which the gate never
+/// detected any speech is dropped locally: no upload, no gRPC session and no
+/// request — which also means the model cannot hallucinate on silence.
+fn should_transcribe(silence_filter: bool, speech_ms: u64) -> bool {
+    !(silence_filter && speech_ms == 0)
 }
 
 fn schedule_hud_reset(state: AppState, delay_ms: u64) {
@@ -1319,5 +1381,21 @@ fn refresh_dictionary(state: &AppState, db: &Arc<Database>) {
             }
         }
         Err(err) => warn!("Could not refresh dictionary: {}", err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nothing_is_sent_when_the_gate_heard_no_speech() {
+        // With the filter on and no detected speech nothing reaches the
+        // backend, so the model can never hallucinate on silence.
+        assert!(!should_transcribe(true, 0));
+        // Any detected speech is transcribed.
+        assert!(should_transcribe(true, 120));
+        // With the filter off everything is sent.
+        assert!(should_transcribe(false, 0));
     }
 }
