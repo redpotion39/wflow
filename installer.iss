@@ -1,5 +1,5 @@
 #define MyAppName "Wflow"
-#define MyAppVersion "0.3.3"
+#define MyAppVersion "0.3.4"
 #define MyAppPublisher "Wflow Team"
 #define MyAppExeName "wflow.exe"
 

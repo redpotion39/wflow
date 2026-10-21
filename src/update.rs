@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use semver::Version;
 use serde::Deserialize;
+use std::time::Duration;
 
 pub const DEFAULT_REPO: &str = "redpotion39/wflow";
 
@@ -162,8 +163,24 @@ fn select_update(releases: Vec<GithubRelease>, include_prerelease: bool) -> Opti
     })
 }
 
+/// How long the whole update check may take before it is given up on.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Fetches the release feed and returns an update when one is available.
+///
+/// The check is bounded by a timeout so the UI can never get stuck on
+/// "checking…" when the network is slow or blocked.
 pub async fn check(include_prerelease: bool) -> Result<Option<UpdateInfo>> {
+    match tokio::time::timeout(CHECK_TIMEOUT, check_inner(include_prerelease)).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!(
+            "การตรวจสอบอัปเดตใช้เวลานานเกินไป (หมดเวลา {} วินาที) — ตรวจสอบการเชื่อมต่ออินเทอร์เน็ต",
+            CHECK_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+async fn check_inner(include_prerelease: bool) -> Result<Option<UpdateInfo>> {
     let url = format!(
         "https://api.github.com/repos/{}/releases?per_page=30",
         repo()
@@ -178,7 +195,7 @@ pub async fn check(include_prerelease: bool) -> Result<Option<UpdateInfo>> {
         if let Some(token) = token.as_ref() {
             request = request.header("Authorization", format!("Bearer {}", token));
         }
-        request
+        request.timeout(Duration::from_secs(10))
     })
     .await?;
 

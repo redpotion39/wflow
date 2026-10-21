@@ -22,6 +22,17 @@ pub enum ActiveTab {
     Settings,
 }
 
+/// The sections of the settings page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsSection {
+    Shortcuts,
+    Audio,
+    Ai,
+    Voice,
+    Privacy,
+    Updates,
+}
+
 #[derive(Debug, Clone)]
 pub enum GuiEvent {
     StartDictation,
@@ -176,6 +187,10 @@ pub struct WisprFlowGui {
     stt_test_status: Arc<Mutex<Option<Result<String, String>>>>,
     /// Last update payload the GUI has rendered, used to detect changes.
     last_seen_update: Option<UpdateInfo>,
+    /// The section of the settings page that is currently shown.
+    settings_section: SettingsSection,
+    /// The application's long-lived Tokio runtime, used for background work.
+    runtime: tokio::runtime::Handle,
     stt_test_in_progress: Arc<AtomicBool>,
 }
 
@@ -233,7 +248,11 @@ const LANGUAGE_OPTIONS: &[(&str, &str)] = &[
 ];
 
 impl WisprFlowGui {
-    pub fn new(state: AppState, event_tx: mpsc::UnboundedSender<GuiEvent>) -> Self {
+    pub fn new(
+        state: AppState,
+        event_tx: mpsc::UnboundedSender<GuiEvent>,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
         let (
             endpoint,
             token,
@@ -316,6 +335,7 @@ impl WisprFlowGui {
         Self {
             state,
             event_tx,
+            runtime,
             active_tab: ActiveTab::Studio,
             search_query: String::new(),
             settings_endpoint: endpoint,
@@ -369,6 +389,7 @@ impl WisprFlowGui {
             stt_test_status: Arc::new(Mutex::new(None)),
             stt_test_in_progress: Arc::new(AtomicBool::new(false)),
             last_seen_update: None,
+            settings_section: SettingsSection::Shortcuts,
         }
     }
 
@@ -2813,9 +2834,71 @@ impl WisprFlowGui {
     }
 
     fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
+        // A compact section switcher keeps the settings readable: instead of
+        // one very long page, every topic gets its own short page.
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for (section, icon, label) in [
+                (SettingsSection::Shortcuts, "⌨️", "Shortcuts"),
+                (SettingsSection::Audio, "🎙️", "Audio"),
+                (SettingsSection::Ai, "🤖", "AI & Models"),
+                (SettingsSection::Voice, "🎚️", "Voice & Text"),
+                (SettingsSection::Privacy, "🔒", "Privacy"),
+                (SettingsSection::Updates, "🔄", "Updates"),
+            ] {
+                let selected = self.settings_section == section;
+                let text = egui::RichText::new(format!("{} {}", icon, label))
+                    .font(FontId::proportional(12.0))
+                    .color(if selected {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_rgb(148, 163, 184)
+                    })
+                    .strong();
+
+                let btn = egui::Button::new(text)
+                    .fill(if selected {
+                        Color32::from_rgb(79, 70, 229)
+                    } else {
+                        Color32::from_rgb(22, 29, 44)
+                    })
+                    .stroke(Stroke::new(
+                        1.0_f32,
+                        if selected {
+                            Color32::from_rgb(129, 140, 248)
+                        } else {
+                            Color32::from_rgb(51, 65, 85)
+                        },
+                    ))
+                    .rounding(Rounding::same(8.0));
+
+                if ui.add(btn).clicked() {
+                    self.settings_section = section;
+                }
+            }
+        });
+
+        ui.add_space(10.0);
+
         egui::ScrollArea::vertical().show(ui, |ui| {
-            // CARD 1: Hotkeys & Trigger Preferences
-            egui::Frame::none()
+            match self.settings_section {
+                SettingsSection::Shortcuts => self.render_settings_shortcuts(ui),
+                SettingsSection::Audio => self.render_settings_audio(ui),
+                SettingsSection::Ai => self.render_settings_ai(ui),
+                SettingsSection::Voice => self.render_settings_voice(ui),
+                SettingsSection::Privacy => self.render_settings_privacy(ui),
+                SettingsSection::Updates => self.render_settings_updates(ui),
+            }
+
+            ui.add_space(16.0);
+            self.render_settings_save_button(ui);
+        });
+    }
+
+    fn render_settings_shortcuts(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        // CARD 1: Hotkeys & Trigger Preferences
+        egui::Frame::none()
                 .fill(Color32::from_rgb(17, 23, 36))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
                 .rounding(Rounding::same(12.0))
@@ -3079,11 +3162,12 @@ impl WisprFlowGui {
                             .color(Color32::from_rgb(148, 163, 184)),
                     );
                 });
+    }
 
-            ui.add_space(10.0);
-
-            // CARD 1.5: Microphone & Sound Effects Hardware
-            egui::Frame::none()
+    fn render_settings_audio(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        // CARD 1.5: Microphone & Sound Effects Hardware
+        egui::Frame::none()
                 .fill(Color32::from_rgb(17, 23, 36))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
                 .rounding(Rounding::same(12.0))
@@ -3153,10 +3237,60 @@ impl WisprFlowGui {
                     );
                 });
 
-            ui.add_space(10.0);
+        // CARD 3: Language & Floating Overlay
+        egui::Frame::none()
+                .fill(Color32::from_rgb(17, 23, 36))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
+                .rounding(Rounding::same(12.0))
+                .inner_margin(egui::Margin::same(16.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("🌐  LANGUAGE & FLOATING OVERLAY HUD")
+                            .font(FontId::proportional(12.5))
+                            .color(Color32::from_rgb(148, 163, 184))
+                            .strong(),
+                    );
+                    ui.add_space(10.0);
 
-            // CARD 1.8: AI Post-Processing & Smart Formatting
-            egui::Frame::none()
+                    // Language Selector
+                    ui.horizontal(|ui| {
+                        ui.label("Transcription Language:");
+                        let current_label = LANGUAGE_OPTIONS
+                            .iter()
+                            .find(|(_, code)| *code == self.settings_language)
+                            .map(|(name, _)| *name)
+                            .unwrap_or("English (US)");
+
+                        egui::ComboBox::from_id_salt("lang_combo")
+                            .selected_text(current_label)
+                            .show_ui(ui, |ui| {
+                                for (name, code) in LANGUAGE_OPTIONS {
+                                    if ui.selectable_label(self.settings_language == *code, *name).clicked() {
+                                        self.settings_language = code.to_string();
+                                    }
+                                }
+                            });
+                    });
+
+                    ui.add_space(10.0);
+
+                    // Floating HUD Checkbox
+                    ui.checkbox(
+                        &mut self.settings_show_floating_hud,
+                        "Show floating recording symbol & live waveform HUD (overlay)",
+                    );
+                    ui.label(
+                        egui::RichText::new("  └ Displays an on-screen pill indicator with animated audio waveform bars when dictating without stealing focus.")
+                            .font(FontId::proportional(11.0))
+                            .color(Color32::from_rgb(148, 163, 184)),
+                    );
+                });
+    }
+
+    fn render_settings_ai(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        // CARD 1.8: AI Post-Processing & Smart Formatting
+        egui::Frame::none()
                 .fill(Color32::from_rgb(17, 23, 36))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
                 .rounding(Rounding::same(12.0))
@@ -3225,10 +3359,8 @@ impl WisprFlowGui {
                     }
                 });
 
-            ui.add_space(10.0);
-
-            // CARD 2: STT AI Service Providers
-            egui::Frame::none()
+        // CARD 2: STT AI Service Providers
+        egui::Frame::none()
                 .fill(Color32::from_rgb(17, 23, 36))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
                 .rounding(Rounding::same(12.0))
@@ -3463,62 +3595,12 @@ impl WisprFlowGui {
                         }
                     }
                 });
+    }
 
-            ui.add_space(10.0);
-
-            // CARD 3: Language & Floating Overlay
-            egui::Frame::none()
-                .fill(Color32::from_rgb(17, 23, 36))
-                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
-                .rounding(Rounding::same(12.0))
-                .inner_margin(egui::Margin::same(16.0))
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new("🌐  LANGUAGE & FLOATING OVERLAY HUD")
-                            .font(FontId::proportional(12.5))
-                            .color(Color32::from_rgb(148, 163, 184))
-                            .strong(),
-                    );
-                    ui.add_space(10.0);
-
-                    // Language Selector
-                    ui.horizontal(|ui| {
-                        ui.label("Transcription Language:");
-                        let current_label = LANGUAGE_OPTIONS
-                            .iter()
-                            .find(|(_, code)| *code == self.settings_language)
-                            .map(|(name, _)| *name)
-                            .unwrap_or("English (US)");
-
-                        egui::ComboBox::from_id_salt("lang_combo")
-                            .selected_text(current_label)
-                            .show_ui(ui, |ui| {
-                                for (name, code) in LANGUAGE_OPTIONS {
-                                    if ui.selectable_label(self.settings_language == *code, *name).clicked() {
-                                        self.settings_language = code.to_string();
-                                    }
-                                }
-                            });
-                    });
-
-                    ui.add_space(10.0);
-
-                    // Floating HUD Checkbox
-                    ui.checkbox(
-                        &mut self.settings_show_floating_hud,
-                        "Show floating recording symbol & live waveform HUD (overlay)",
-                    );
-                    ui.label(
-                        egui::RichText::new("  └ Displays an on-screen pill indicator with animated audio waveform bars when dictating without stealing focus.")
-                            .font(FontId::proportional(11.0))
-                            .color(Color32::from_rgb(148, 163, 184)),
-                    );
-                });
-
-            ui.add_space(14.0);
-
-            // CARD 4: Voice filter & text quality
-            egui::Frame::none()
+    fn render_settings_voice(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        // CARD 4: Voice filter & text quality
+        egui::Frame::none()
                 .fill(Color32::from_rgb(17, 23, 36))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
                 .rounding(Rounding::same(12.0))
@@ -3644,11 +3726,12 @@ impl WisprFlowGui {
                         );
                     });
                 });
+    }
 
-            ui.add_space(14.0);
-
-            // CARD 5: Privacy & Data
-            egui::Frame::none()
+    fn render_settings_privacy(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        // CARD 5: Privacy & Data
+        egui::Frame::none()
                 .fill(Color32::from_rgb(17, 23, 36))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
                 .rounding(Rounding::same(12.0))
@@ -3746,267 +3829,331 @@ impl WisprFlowGui {
                         .color(Color32::from_rgb(100, 116, 139)),
                     );
                 });
+    }
 
-            ui.add_space(10.0);
+    fn render_settings_updates(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        // CARD 5: Updates & Diagnostics
+        egui::Frame::none()
+            .fill(Color32::from_rgb(17, 23, 36))
+            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
+            .rounding(Rounding::same(12.0))
+            .inner_margin(egui::Margin::same(16.0))
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("🔄  SOFTWARE UPDATES & DIAGNOSTICS")
+                        .font(FontId::proportional(12.5))
+                        .color(Color32::from_rgb(148, 163, 184))
+                        .strong(),
+                );
+                ui.add_space(10.0);
 
-            // CARD 5: Updates & Diagnostics
-            egui::Frame::none()
-                .fill(Color32::from_rgb(17, 23, 36))
-                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
-                .rounding(Rounding::same(12.0))
-                .inner_margin(egui::Margin::same(16.0))
-                .show(ui, |ui| {
+                ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new("🔄  SOFTWARE UPDATES & DIAGNOSTICS")
-                            .font(FontId::proportional(12.5))
-                            .color(Color32::from_rgb(148, 163, 184))
-                            .strong(),
-                    );
-                    ui.add_space(10.0);
-
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "Wflow v{}",
-                                crate::update::current_version()
-                            ))
+                        egui::RichText::new(format!("Wflow v{}", crate::update::current_version()))
                             .font(FontId::monospace(12.5))
                             .color(Color32::from_rgb(56, 189, 248))
                             .strong(),
-                        );
-                        ui.label(
-                            egui::RichText::new("• ตรวจสอบจาก GitHub Releases")
-                                .font(FontId::proportional(11.0))
-                                .color(Color32::from_rgb(148, 163, 184)),
-                        );
-                    });
-
-                    ui.add_space(8.0);
-                    ui.checkbox(
-                        &mut self.settings_check_updates,
-                        "ตรวจสอบอัปเดตอัตโนมัติเมื่อเริ่มโปรแกรม",
-                    );
-                    ui.checkbox(
-                        &mut self.settings_include_prerelease,
-                        "รวมเวอร์ชันทดลอง (pre-release)",
                     );
                     ui.label(
-                        egui::RichText::new(
-                            "  └ การเปลี่ยนแปลงในหน้านี้จะมีผลหลังกด Save All Preferences",
-                        )
+                        egui::RichText::new("• ตรวจสอบจาก GitHub Releases")
+                            .font(FontId::proportional(11.0))
+                            .color(Color32::from_rgb(148, 163, 184)),
+                    );
+                });
+
+                ui.add_space(8.0);
+                ui.checkbox(
+                    &mut self.settings_check_updates,
+                    "ตรวจสอบอัปเดตอัตโนมัติเมื่อเริ่มโปรแกรม",
+                );
+                ui.checkbox(
+                    &mut self.settings_include_prerelease,
+                    "รวมเวอร์ชันทดลอง (pre-release)",
+                );
+                ui.label(
+                    egui::RichText::new("  └ การเปลี่ยนแปลงในหน้านี้จะมีผลหลังกด Save All Preferences")
                         .font(FontId::proportional(10.5))
                         .color(Color32::from_rgb(100, 116, 139)),
+                );
+                ui.horizontal(|ui| {
+                    ui.label("ตรวจสอบทุก ๆ:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.settings_update_interval_hours)
+                            .range(1..=720)
+                            .speed(1.0)
+                            .suffix(" ชั่วโมง"),
                     );
-                    ui.horizontal(|ui| {
-                        ui.label("ตรวจสอบทุก ๆ:");
-                        ui.add(
-                            egui::DragValue::new(&mut self.settings_update_interval_hours)
-                                .range(1..=720)
-                                .speed(1.0)
-                                .suffix(" ชั่วโมง"),
-                        );
-                    });
+                });
 
-                    ui.add_space(10.0);
-                    let running = self.state.update_check_running.load(Ordering::SeqCst);
-                    ui.horizontal(|ui| {
-                        let check_btn = egui::Button::new(
-                            egui::RichText::new(shape_thai(if running {
-                                "⏳ กำลังตรวจสอบ..."
-                            } else {
-                                "🔍 ตรวจสอบอัปเดตเดี๋ยวนี้"
-                            }))
-                            .font(FontId::proportional(12.0))
-                            .color(Color32::WHITE)
-                            .strong(),
-                        )
-                        .fill(Color32::from_rgb(14, 116, 144))
-                        .rounding(Rounding::same(6.0));
+                ui.add_space(10.0);
+                let running = self.state.update_check_running.load(Ordering::SeqCst);
+                ui.horizontal(|ui| {
+                    let check_btn = egui::Button::new(
+                        egui::RichText::new(shape_thai(if running {
+                            "⏳ กำลังตรวจสอบ..."
+                        } else {
+                            "🔍 ตรวจสอบอัปเดตเดี๋ยวนี้"
+                        }))
+                        .font(FontId::proportional(12.0))
+                        .color(Color32::WHITE)
+                        .strong(),
+                    )
+                    .fill(Color32::from_rgb(14, 116, 144))
+                    .rounding(Rounding::same(6.0));
 
-                        if ui.add_enabled(!running, check_btn).clicked() {
-                            let _ = self.event_tx.send(GuiEvent::CheckUpdate);
-                        }
-                        if ui.button("🌐 เปิดหน้า Releases").clicked() {
-                            let _ = self.event_tx.send(GuiEvent::OpenUrl(format!(
-                                "https://github.com/{}/releases",
-                                crate::update::DEFAULT_REPO
-                            )));
-                        }
-                        if ui.button("📂 เปิดโฟลเดอร์ Log").clicked() {
-                            let _ = self.event_tx.send(GuiEvent::OpenLogFolder);
-                        }
-                    });
-
-                    let update_info = self
-                        .state
-                        .update_info
-                        .lock()
-                        .ok()
-                        .and_then(|guard| guard.clone());
-                    let update_error = self
-                        .state
-                        .update_error
-                        .lock()
-                        .ok()
-                        .and_then(|guard| guard.clone());
-
-                    if let Some(info) = update_info {
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new(shape_thai(&format!(
-                                "🎉 มีเวอร์ชันใหม่: v{} (ปัจจุบัน v{})",
-                                info.latest, info.current
-                            )))
-                            .font(FontId::proportional(12.0))
-                            .color(Color32::from_rgb(134, 239, 172)),
-                        );
-                        ui.horizontal(|ui| {
-                            if ui.button("⬇️ ดาวน์โหลด").clicked() {
-                                let _ = self
-                                    .event_tx
-                                    .send(GuiEvent::OpenUrl(info.download_url.clone()));
-                            }
-                            if ui.button("📝 ดู Release Notes").clicked() {
-                                let _ = self
-                                    .event_tx
-                                    .send(GuiEvent::OpenUrl(info.release_url.clone()));
-                            }
-                        });
-                    } else if let Some(err) = update_error {
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new(shape_thai(&format!("⚠️ ตรวจสอบอัปเดตไม่สำเร็จ: {}", err)))
-                                .font(FontId::proportional(11.0))
-                                .color(Color32::from_rgb(252, 165, 165)),
-                        );
+                    if ui.add_enabled(!running, check_btn).clicked() {
+                        let _ = self.event_tx.send(GuiEvent::CheckUpdate);
                     }
-
-                    let last_check = self
-                        .state
-                        .config
-                        .lock()
-                        .ok()
-                        .and_then(|cfg| cfg.last_update_check.clone());
-                    if let Some(last) = last_check {
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(format!("ตรวจสอบล่าสุด: {}", last))
-                                .font(FontId::proportional(10.5))
-                                .color(Color32::from_rgb(100, 116, 139)),
-                        );
+                    if ui.button("🌐 เปิดหน้า Releases").clicked() {
+                        let _ = self.event_tx.send(GuiEvent::OpenUrl(format!(
+                            "https://github.com/{}/releases",
+                            crate::update::DEFAULT_REPO
+                        )));
+                    }
+                    if ui.button("📂 เปิดโฟลเดอร์ Log").clicked() {
+                        let _ = self.event_tx.send(GuiEvent::OpenLogFolder);
                     }
                 });
 
-            ui.add_space(14.0);
+                let update_info = self
+                    .state
+                    .update_info
+                    .lock()
+                    .ok()
+                    .and_then(|guard| guard.clone());
+                let update_error = self
+                    .state
+                    .update_error
+                    .lock()
+                    .ok()
+                    .and_then(|guard| guard.clone());
 
-            // Save Preferences Button
-            let save_btn = egui::Button::new(
-                egui::RichText::new("💾  Save All Preferences")
-                    .font(FontId::proportional(14.0))
-                    .color(Color32::WHITE)
-                    .strong(),
-            )
-            .fill(Color32::from_rgb(79, 70, 229))
-            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(129, 140, 248)))
-            .rounding(Rounding::same(8.0))
-            .min_size(Vec2::new(180.0, 38.0));
-
-            if ui.add(save_btn).clicked() {
-                let (
-                    user_id,
-                    skipped_update_version,
-                    last_update_check,
-                    client_name,
-                    client_version,
-                    stt_timeout_secs,
-                ) = {
-                    let cfg = self.state.config.lock().unwrap_or_else(|e| e.into_inner());
-                    (
-                        cfg.user_id.clone(),
-                        cfg.skipped_update_version.clone(),
-                        cfg.last_update_check.clone(),
-                        cfg.client_name.clone(),
-                        cfg.client_version.clone(),
-                        cfg.stt_timeout_secs,
-                    )
-                };
-                let new_config = AppConfig {
-                    endpoint_url: self.settings_endpoint.clone(),
-                    user_id,
-                    hotkey: self.settings_hotkey,
-                    toggle_window: self.settings_toggle,
-                    hotkey_vk: self.settings_hotkey.key,
-                    toggle_window_vk: self.settings_toggle.key,
-                    stt_provider: self.settings_stt_provider,
-                    groq_api_key: if self.settings_groq_api_key.trim().is_empty() {
-                        None
-                    } else {
-                        Some(self.settings_groq_api_key.trim().to_string())
-                    },
-                    groq_model: self.settings_groq_model.clone(),
-                    elevenlabs_api_key: if self.settings_elevenlabs_api_key.trim().is_empty() {
-                        None
-                    } else {
-                        Some(self.settings_elevenlabs_api_key.trim().to_string())
-                    },
-                    elevenlabs_model: self.settings_elevenlabs_model.clone(),
-                    baseten_api_key: if self.settings_baseten_api_key.trim().is_empty() {
-                        None
-                    } else {
-                        Some(self.settings_baseten_api_key.trim().to_string())
-                    },
-                    baseten_model_id: self.settings_baseten_model.trim().to_string(),
-                    show_floating_hud: self.settings_show_floating_hud,
-                    ai_formatting: self.settings_ai_formatting,
-                    writing_style: self.settings_writing_style.clone(),
-                    sound_effects: self.settings_sound_effects,
-                    input_device_name: self.settings_input_device_name.clone(),
-                    recording_trigger_mode: self.settings_recording_trigger_mode.clone(),
-                    language_code: self.settings_language.clone(),
-                    auto_paste: self.settings_auto_paste,
-                    auto_start: self.settings_auto_start,
-                    close_to_tray: self.settings_close_to_tray,
-                    share_context: self.settings_share_context,
-                    store_textbox_contents: self.settings_store_textbox_contents,
-                    check_updates: self.settings_check_updates,
-                    include_prerelease: self.settings_include_prerelease,
-                    update_check_interval_hours: self.settings_update_interval_hours.max(1),
-                    last_update_check,
-                    skipped_update_version,
-                    max_recording_secs: self.settings_max_recording_secs.clamp(10, 3600),
-                    client_name,
-                    client_version,
-                    stt_timeout_secs,
-                    silence_filter: self.settings_silence_filter,
-                    silence_sensitivity: self.settings_silence_sensitivity.clamp(0.0, 1.0),
-                    silence_stop_secs: self.settings_silence_stop_secs.clamp(0, 600),
-                    hallucination_guard: self.settings_hallucination_guard,
-                    autocorrect_enabled: self.settings_autocorrect_enabled,
-                    autocorrect_use_llm: self.settings_autocorrect_use_llm,
-                    autocorrect_languages: self.settings_autocorrect_languages.trim().to_string(),
-                    mixed_spacing: self.settings_mixed_spacing,
-                    auth_token: if self.settings_token.is_empty() {
-                        None
-                    } else {
-                        Some(self.settings_token.clone())
-                    },
-                };
-
-                crate::sound::set_sound_enabled(new_config.sound_effects);
-
-                if let Ok(mut lock) = self.state.config.lock() {
-                    *lock = new_config.clone();
+                if let Some(info) = update_info {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(shape_thai(&format!(
+                            "🎉 มีเวอร์ชันใหม่: v{} (ปัจจุบัน v{})",
+                            info.latest, info.current
+                        )))
+                        .font(FontId::proportional(12.0))
+                        .color(Color32::from_rgb(134, 239, 172)),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("⬇️ ดาวน์โหลด").clicked() {
+                            let _ = self
+                                .event_tx
+                                .send(GuiEvent::OpenUrl(info.download_url.clone()));
+                        }
+                        if ui.button("📝 ดู Release Notes").clicked() {
+                            let _ = self
+                                .event_tx
+                                .send(GuiEvent::OpenUrl(info.release_url.clone()));
+                        }
+                    });
+                } else if let Some(err) = update_error {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(shape_thai(&format!(
+                            "⚠️ ตรวจสอบอัปเดตไม่สำเร็จ: {}",
+                            err
+                        )))
+                        .font(FontId::proportional(11.0))
+                        .color(Color32::from_rgb(252, 165, 165)),
+                    );
                 }
-                let _ = self.event_tx.send(GuiEvent::SaveConfig(Box::new(new_config)));
-                self.state.set_toast("Settings & STT configurations saved successfully!");
-            }
 
-            ui.add_space(20.0);
-        });
+                let last_check = self
+                    .state
+                    .config
+                    .lock()
+                    .ok()
+                    .and_then(|cfg| cfg.last_update_check.clone());
+                if let Some(last) = last_check {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!("ตรวจสอบล่าสุด: {}", last))
+                            .font(FontId::proportional(10.5))
+                            .color(Color32::from_rgb(100, 116, 139)),
+                    );
+                }
+            });
     }
 
-    /// Handles a click on the update button: download the new release when there
-    /// is one, otherwise start a check.
+    /// The "Save all preferences" button, shared by every settings section.
+    fn render_settings_save_button(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        let dirty = self.settings_dirty();
+
+        if dirty {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("●  มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก")
+                        .font(FontId::proportional(12.0))
+                        .color(Color32::from_rgb(251, 191, 36))
+                        .strong(),
+                );
+                ui.label(
+                    egui::RichText::new("(กด Save All Preferences เพื่อใช้งาน)")
+                        .font(FontId::proportional(11.0))
+                        .color(Color32::from_rgb(148, 163, 184)),
+                );
+            });
+            ui.add_space(4.0);
+        }
+
+        let save_label = if dirty {
+            "💾  Save All Preferences  •"
+        } else {
+            "💾  Save All Preferences"
+        };
+        let save_btn = egui::Button::new(
+            egui::RichText::new(save_label)
+                .font(FontId::proportional(14.0))
+                .color(Color32::WHITE)
+                .strong(),
+        )
+        .fill(if dirty {
+            Color32::from_rgb(202, 138, 4)
+        } else {
+            Color32::from_rgb(79, 70, 229)
+        })
+        .stroke(Stroke::new(
+            1.0_f32,
+            if dirty {
+                Color32::from_rgb(251, 191, 36)
+            } else {
+                Color32::from_rgb(129, 140, 248)
+            },
+        ))
+        .rounding(Rounding::same(8.0))
+        .min_size(Vec2::new(240.0, 42.0));
+
+        if ui.add(save_btn).clicked() {
+            self.save_all_settings();
+        }
+    }
+
+    /// Writes every setting back to disk and notifies the background worker.
+    fn save_all_settings(&mut self) {
+        let new_config = self.build_settings_config();
+
+        crate::sound::set_sound_enabled(new_config.sound_effects);
+
+        if let Ok(mut lock) = self.state.config.lock() {
+            *lock = new_config.clone();
+        }
+        let _ = self
+            .event_tx
+            .send(GuiEvent::SaveConfig(Box::new(new_config)));
+        self.state
+            .set_toast("Settings & STT configurations saved successfully!");
+    }
+
+    /// Builds the configuration from the current state of the settings form.
+    fn build_settings_config(&self) -> AppConfig {
+        let (
+            user_id,
+            skipped_update_version,
+            last_update_check,
+            client_name,
+            client_version,
+            stt_timeout_secs,
+        ) = {
+            let cfg = self.state.config.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                cfg.user_id.clone(),
+                cfg.skipped_update_version.clone(),
+                cfg.last_update_check.clone(),
+                cfg.client_name.clone(),
+                cfg.client_version.clone(),
+                cfg.stt_timeout_secs,
+            )
+        };
+        let new_config = AppConfig {
+            endpoint_url: self.settings_endpoint.clone(),
+            user_id,
+            hotkey: self.settings_hotkey,
+            toggle_window: self.settings_toggle,
+            hotkey_vk: self.settings_hotkey.key,
+            toggle_window_vk: self.settings_toggle.key,
+            stt_provider: self.settings_stt_provider,
+            groq_api_key: if self.settings_groq_api_key.trim().is_empty() {
+                None
+            } else {
+                Some(self.settings_groq_api_key.trim().to_string())
+            },
+            groq_model: self.settings_groq_model.clone(),
+            elevenlabs_api_key: if self.settings_elevenlabs_api_key.trim().is_empty() {
+                None
+            } else {
+                Some(self.settings_elevenlabs_api_key.trim().to_string())
+            },
+            elevenlabs_model: self.settings_elevenlabs_model.clone(),
+            baseten_api_key: if self.settings_baseten_api_key.trim().is_empty() {
+                None
+            } else {
+                Some(self.settings_baseten_api_key.trim().to_string())
+            },
+            baseten_model_id: self.settings_baseten_model.trim().to_string(),
+            show_floating_hud: self.settings_show_floating_hud,
+            ai_formatting: self.settings_ai_formatting,
+            writing_style: self.settings_writing_style.clone(),
+            sound_effects: self.settings_sound_effects,
+            input_device_name: self.settings_input_device_name.clone(),
+            recording_trigger_mode: self.settings_recording_trigger_mode.clone(),
+            language_code: self.settings_language.clone(),
+            auto_paste: self.settings_auto_paste,
+            auto_start: self.settings_auto_start,
+            close_to_tray: self.settings_close_to_tray,
+            share_context: self.settings_share_context,
+            store_textbox_contents: self.settings_store_textbox_contents,
+            check_updates: self.settings_check_updates,
+            include_prerelease: self.settings_include_prerelease,
+            update_check_interval_hours: self.settings_update_interval_hours.max(1),
+            last_update_check,
+            skipped_update_version,
+            max_recording_secs: self.settings_max_recording_secs.clamp(10, 3600),
+            client_name,
+            client_version,
+            stt_timeout_secs,
+            silence_filter: self.settings_silence_filter,
+            silence_sensitivity: self.settings_silence_sensitivity.clamp(0.0, 1.0),
+            silence_stop_secs: self.settings_silence_stop_secs.clamp(0, 600),
+            hallucination_guard: self.settings_hallucination_guard,
+            autocorrect_enabled: self.settings_autocorrect_enabled,
+            autocorrect_use_llm: self.settings_autocorrect_use_llm,
+            autocorrect_languages: self.settings_autocorrect_languages.trim().to_string(),
+            mixed_spacing: self.settings_mixed_spacing,
+            auth_token: if self.settings_token.is_empty() {
+                None
+            } else {
+                Some(self.settings_token.clone())
+            },
+        };
+
+        new_config
+    }
+
+    /// True when the settings form differs from what is stored on disk.
+    fn settings_dirty(&self) -> bool {
+        let mut candidate = self.build_settings_config();
+        let saved = lock(&self.state.config).clone();
+
+        // Fields that the settings form does not own must not influence the
+        // comparison, otherwise the page would always look "unsaved".
+        candidate.user_id = saved.user_id.clone();
+        candidate.last_update_check = saved.last_update_check.clone();
+        candidate.skipped_update_version = saved.skipped_update_version.clone();
+        candidate.hotkey_vk = saved.hotkey_vk;
+        candidate.toggle_window_vk = saved.toggle_window_vk;
+        candidate.auto_start = saved.auto_start;
+
+        candidate != saved
+    }
+
+    /// Handles a click on the update button: download the new release when
+    /// there is one, otherwise start a check.
     fn trigger_update_action(&self, pending: &Option<UpdateInfo>) {
         if let Some(info) = pending.as_ref() {
             // Open the platform-appropriate download in the browser.
@@ -4269,40 +4416,30 @@ impl WisprFlowGui {
         let endpoint = self.settings_endpoint.clone();
         let egui_ctx = Arc::clone(&self.state.egui_ctx);
 
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            if let Ok(rt) = rt {
-                rt.block_on(async move {
-                    let res = match provider {
-                        SttProvider::Groq => crate::stt::test_groq_api(&groq_key).await,
-                        SttProvider::ElevenLabs => {
-                            crate::stt::test_elevenlabs_api(&eleven_key).await
-                        }
-                        SttProvider::WisprFlow => {
-                            crate::stt::test_wisprflow_endpoint(&endpoint).await
-                        }
-                    };
+        // Run the test on the application's runtime: the shared HTTP client is
+        // bound to it and would stop working on a throw-away runtime.
+        let runtime = self.runtime.clone();
+        runtime.spawn(async move {
+            let res = match provider {
+                SttProvider::Groq => crate::stt::test_groq_api(&groq_key).await,
+                SttProvider::ElevenLabs => crate::stt::test_elevenlabs_api(&eleven_key).await,
+                SttProvider::WisprFlow => crate::stt::test_wisprflow_endpoint(&endpoint).await,
+            };
 
-                    let mapped_res = match res {
-                        Ok(msg) => Ok(msg),
-                        Err(err) => Err(err.to_string()),
-                    };
+            let mapped_res = match res {
+                Ok(msg) => Ok(msg),
+                Err(err) => Err(err.to_string()),
+            };
 
-                    if let Ok(mut lock) = status_lock.lock() {
-                        *lock = Some(mapped_res);
-                    }
-                    in_progress.store(false, Ordering::SeqCst);
+            if let Ok(mut lock) = status_lock.lock() {
+                *lock = Some(mapped_res);
+            }
+            in_progress.store(false, Ordering::SeqCst);
 
-                    if let Ok(lock) = egui_ctx.lock() {
-                        if let Some(ctx) = lock.as_ref() {
-                            ctx.request_repaint();
-                        }
-                    }
-                });
-            } else {
-                in_progress.store(false, Ordering::SeqCst);
+            if let Ok(lock) = egui_ctx.lock() {
+                if let Some(ctx) = lock.as_ref() {
+                    ctx.request_repaint();
+                }
             }
         });
     }

@@ -115,7 +115,7 @@ impl KeyCombo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppConfig {
     pub endpoint_url: String,
     pub user_id: String,

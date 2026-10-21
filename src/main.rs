@@ -70,31 +70,46 @@ fn main() -> Result<()> {
     let _hook_thread =
         PlatformManager::start_hotkey_listener(hotkey_tx, config.hotkey, config.toggle_window)?;
 
+    // One runtime for the whole process. Every HTTP request and the update
+    // checker share it, so the connection pool of the shared client always has
+    // a live runtime behind it.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to create Tokio runtime: {}", e);
+            return Err(e.into());
+        }
+    };
+    let runtime_handle = runtime.handle().clone();
+
     if config.check_updates
         && wflow::update::should_check(
             config.last_update_check.as_deref(),
             config.update_check_interval_hours,
         )
     {
-        spawn_update_check(app_state.clone(), config.include_prerelease);
+        spawn_update_check(
+            &runtime_handle,
+            app_state.clone(),
+            config.include_prerelease,
+        );
     }
 
     let db_worker = Arc::clone(&db);
+    let worker_handle = runtime_handle.clone();
     std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(r) => r,
-            Err(e) => {
-                error!("Failed to create Tokio runtime: {}", e);
-                return;
-            }
-        };
-
-        rt.block_on(async move {
-            run_background_coordinator(app_state_worker, db_worker, &mut hotkey_rx, &mut gui_rx)
-                .await;
+        runtime.block_on(async move {
+            run_background_coordinator(
+                app_state_worker,
+                db_worker,
+                &mut hotkey_rx,
+                &mut gui_rx,
+                worker_handle,
+            )
+            .await;
         });
     });
 
@@ -125,7 +140,13 @@ fn main() -> Result<()> {
     let run_result = eframe::run_native(
         "Wflow",
         native_options,
-        Box::new(move |_cc| Ok(Box::new(WisprFlowGui::new(app_state_gui, gui_tx)))),
+        Box::new(move |_cc| {
+            Ok(Box::new(WisprFlowGui::new(
+                app_state_gui,
+                gui_tx,
+                runtime_handle.clone(),
+            )))
+        }),
     );
 
     if let Err(err) = run_result {
@@ -247,39 +268,33 @@ fn load_app_icon() -> Option<eframe::egui::IconData> {
 }
 
 /// Runs an update check in the background and publishes the result to the GUI.
-fn spawn_update_check(state: AppState, include_prerelease: bool) {
+/// Starts a background update check.
+///
+/// The check runs on the application's long-lived Tokio runtime. This matters:
+/// the shared `reqwest::Client` binds its connection pool to the runtime that
+/// first creates it, so running the check on a throw-away runtime would leave
+/// the pool pointing at a dead runtime and every later request would hang.
+fn spawn_update_check(runtime: &tokio::runtime::Handle, state: AppState, include_prerelease: bool) {
     if state.update_check_running.swap(true, Ordering::SeqCst) {
         return;
     }
 
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build();
-
-        match rt {
-            Ok(rt) => {
-                let result = rt.block_on(wflow::update::check(include_prerelease));
-                match result {
-                    Ok(info) => {
-                        if let Ok(mut lock) = state.update_info.lock() {
-                            *lock = info;
-                        }
-                        if let Ok(mut lock) = state.update_error.lock() {
-                            *lock = None;
-                        }
-                    }
-                    Err(err) => {
-                        warn!("Update check failed: {err:#}");
-                        if let Ok(mut lock) = state.update_error.lock() {
-                            *lock = Some(format!("{err:#}"));
-                        }
-                    }
+    let state = state.clone();
+    runtime.spawn(async move {
+        let result = wflow::update::check(include_prerelease).await;
+        match result {
+            Ok(info) => {
+                if let Ok(mut lock) = state.update_info.lock() {
+                    *lock = info;
+                }
+                if let Ok(mut lock) = state.update_error.lock() {
+                    *lock = None;
                 }
             }
             Err(err) => {
+                warn!("Update check failed: {err:#}");
                 if let Ok(mut lock) = state.update_error.lock() {
-                    *lock = Some(format!("Could not start update checker: {err}"));
+                    *lock = Some(format!("{err:#}"));
                 }
             }
         }
@@ -1119,6 +1134,7 @@ async fn run_background_coordinator(
     db: Arc<Database>,
     hotkey_rx: &mut mpsc::UnboundedReceiver<HotkeyEvent>,
     gui_rx: &mut mpsc::UnboundedReceiver<GuiEvent>,
+    runtime: tokio::runtime::Handle,
 ) {
     let mut session = DictationSession::new();
     let mut last_update_probe = Duration::ZERO;
@@ -1194,7 +1210,7 @@ async fn run_background_coordinator(
                             .lock()
                             .map(|c| c.include_prerelease)
                             .unwrap_or(false);
-                        spawn_update_check(state.clone(), include_prerelease);
+                        spawn_update_check(&runtime, state.clone(), include_prerelease);
                         state.set_toast("กำลังตรวจสอบอัปเดต...");
                         request_repaint(&state);
                     }
@@ -1272,7 +1288,7 @@ async fn run_background_coordinator(
                             .lock()
                             .map(|c| c.include_prerelease)
                             .unwrap_or(false);
-                        spawn_update_check(state.clone(), include_prerelease);
+                        spawn_update_check(&runtime, state.clone(), include_prerelease);
                         state.set_toast("กำลังตรวจสอบอัปเดต...");
                         request_repaint(&state);
                     }
@@ -1317,7 +1333,7 @@ async fn run_background_coordinator(
                         )
                     };
                     if enabled && wflow::update::should_check(last_check.as_deref(), interval) {
-                        spawn_update_check(state.clone(), prerelease);
+                        spawn_update_check(&runtime, state.clone(), prerelease);
                     }
                 }
 
