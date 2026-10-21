@@ -18,6 +18,7 @@ pub enum ActiveTab {
     Studio,
     History,
     Dictionary,
+    Updates,
     Settings,
 }
 
@@ -883,6 +884,7 @@ impl eframe::App for WisprFlowGui {
                     }
                     ActiveTab::History => self.render_history_tab(ui),
                     ActiveTab::Dictionary => self.render_dictionary_tab(ui),
+                    ActiveTab::Updates => self.render_updates_tab(ui),
                     ActiveTab::Settings => self.render_settings_tab(ui),
                 }
 
@@ -1073,10 +1075,20 @@ impl WisprFlowGui {
             let history_count = lock(&self.state.history).len();
             let dict_count = lock(&self.state.dictionary_entries).len();
 
+            // The Updates entry carries a badge when a new release exists so
+            // it can never be missed.
+            let update_badge = self.pending_update().is_some();
+
             let nav_items = [
                 (ActiveTab::Studio, "🎙️", "Live Studio", None),
                 (ActiveTab::History, "📜", "History", Some(history_count)),
                 (ActiveTab::Dictionary, "📖", "Dictionary", Some(dict_count)),
+                (
+                    ActiveTab::Updates,
+                    "🔄",
+                    "Updates",
+                    if update_badge { Some(1) } else { None },
+                ),
                 (ActiveTab::Settings, "⚙️", "Settings", None),
             ];
 
@@ -1387,6 +1399,61 @@ impl WisprFlowGui {
         dictate_key_name: &str,
         _toggle_key_name: &str,
     ) {
+        // The update button never moves to another tab and is never hidden.
+        // The decision whether it needs its own row is made from the full
+        // width of the panel, *before* the title takes up any space.
+        let update_available = self.pending_update();
+        let update_running = self.state.update_check_running.load(Ordering::SeqCst);
+        let current_version = crate::update::current_version().to_string();
+        let (update_label, update_fill, update_stroke, update_text) = update_button_style(
+            update_available
+                .as_ref()
+                .map(|i| i.latest.to_string())
+                .as_deref(),
+            update_running,
+            &current_version,
+            self.animation_time,
+        );
+
+        let update_label = update_label.clone();
+        let build_update_button = || {
+            egui::Button::new(
+                egui::RichText::new(shape_thai(&update_label))
+                    .font(FontId::proportional(12.0))
+                    .color(update_text)
+                    .strong(),
+            )
+            .fill(update_fill)
+            .stroke(Stroke::new(1.2_f32, update_stroke))
+            .rounding(Rounding::same(8.0))
+        };
+
+        // The button always gets its own row, right aligned, so that it can
+        // never be clipped by the status pills — no matter how narrow the
+        // window is.
+        //
+        // The button sits in its own full-width row, right aligned. The row
+        // has to be a `horizontal` layout: a bare `with_layout` in a vertical
+        // context would stretch over the whole panel and centre the button
+        // vertically, pushing the rest of the UI out of view.
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let response = ui.add_enabled(!update_running, build_update_button());
+                if response.clicked() {
+                    self.trigger_update_action(&update_available);
+                }
+                if response.hovered() {
+                    let tip = if update_available.is_some() {
+                        "คลิกเพื่อดาวน์โหลดเวอร์ชันใหม่"
+                    } else {
+                        "คลิกเพื่อตรวจสอบอัปเดต"
+                    };
+                    response.show_tooltip_text(tip);
+                }
+            });
+        });
+        ui.add_space(8.0);
+
         ui.horizontal(|ui| {
             let (title, subtitle) = match self.active_tab {
                 ActiveTab::Studio => (
@@ -1400,6 +1467,10 @@ impl WisprFlowGui {
                 ActiveTab::Dictionary => (
                     "📖 Custom Vocabulary & Snippets",
                     "Domain terminology and text expansion shortcuts",
+                ),
+                ActiveTab::Updates => (
+                    "🔄 Software Updates",
+                    "Check for a new version of Wflow and download it",
                 ),
                 ActiveTab::Settings => (
                     "⚙️ Settings & Audio Hardware",
@@ -1422,56 +1493,6 @@ impl WisprFlowGui {
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Update button: always visible, highlights when a new release exists.
-                let update_available = self.pending_update();
-                let update_running = self.state.update_check_running.load(Ordering::SeqCst);
-                let current_version = crate::update::current_version().to_string();
-
-                let (update_label, update_fill, update_stroke, update_text) = update_button_style(
-                    update_available
-                        .as_ref()
-                        .map(|i| i.latest.to_string())
-                        .as_deref(),
-                    update_running,
-                    &current_version,
-                    self.animation_time,
-                );
-
-                let update_btn = egui::Button::new(
-                    egui::RichText::new(shape_thai(&update_label))
-                        .font(FontId::proportional(12.0))
-                        .color(update_text)
-                        .strong(),
-                )
-                .fill(update_fill)
-                .stroke(Stroke::new(1.2_f32, update_stroke))
-                .rounding(Rounding::same(8.0));
-
-                let update_response = ui.add_enabled(!update_running, update_btn);
-                if update_response.clicked() {
-                    if let Some(info) = update_available.as_ref() {
-                        // Open the platform-appropriate download in the browser.
-                        let _ = self
-                            .event_tx
-                            .send(GuiEvent::OpenUrl(info.download_url.clone()));
-                        self.state
-                            .set_toast(&format!("กำลังเปิดหน้าดาวน์โหลด v{}", info.latest));
-                    } else {
-                        let _ = self.event_tx.send(GuiEvent::CheckUpdate);
-                        self.state.set_toast("กำลังตรวจสอบอัปเดต...");
-                    }
-                }
-                if update_response.hovered() {
-                    let tip = if update_available.is_some() {
-                        "คลิกเพื่อดาวน์โหลดเวอร์ชันใหม่"
-                    } else {
-                        "คลิกเพื่อตรวจสอบอัปเดต"
-                    };
-                    update_response.show_tooltip_text(tip);
-                }
-
-                ui.add_space(8.0);
-
                 // Quick Dictate Action Button
                 let quick_btn = if is_rec {
                     egui::Button::new(
@@ -2577,6 +2598,218 @@ impl WisprFlowGui {
 
             ui.add_space(14.0);
         });
+    }
+
+    fn render_updates_tab(&mut self, ui: &mut egui::Ui) {
+        let current = crate::update::current_version();
+        let pending = self.pending_update();
+        let running = self.state.update_check_running.load(Ordering::SeqCst);
+        let error = lock(&self.state.update_error).clone();
+        let last_check = lock(&self.state.config).last_update_check.clone();
+
+        egui::Frame::none()
+            .fill(Color32::from_rgb(17, 23, 36))
+            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
+            .rounding(Rounding::same(12.0))
+            .inner_margin(egui::Margin::same(18.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("🔄  Wflow Software Update")
+                            .font(FontId::proportional(14.0))
+                            .color(Color32::WHITE)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("v{}", current))
+                            .font(FontId::monospace(13.0))
+                            .color(Color32::from_rgb(56, 189, 248))
+                            .strong(),
+                    );
+                });
+
+                ui.add_space(14.0);
+
+                // --- status line -------------------------------------------------
+                let (status_text, status_color, status_fill, status_stroke) = if running {
+                    (
+                        "⏳ กำลังตรวจสอบอัปเดต...".to_string(),
+                        Color32::from_rgb(203, 213, 225),
+                        Color32::from_rgb(30, 41, 59),
+                        Color32::from_rgb(71, 85, 105),
+                    )
+                } else if let Some(info) = pending.as_ref() {
+                    (
+                        format!("🎉 มีเวอร์ชันใหม่ v{}", info.latest),
+                        Color32::WHITE,
+                        Color32::from_rgb(22, 163, 74),
+                        Color32::from_rgb(74, 222, 128),
+                    )
+                } else if let Some(err) = error.as_ref() {
+                    (
+                        format!("⚠️ ตรวจสอบไม่สำเร็จ: {}", err),
+                        Color32::from_rgb(252, 165, 165),
+                        Color32::from_rgb(45, 18, 22),
+                        Color32::from_rgb(239, 68, 68),
+                    )
+                } else {
+                    (
+                        "✅ เป็นเวอร์ชันล่าสุดแล้ว".to_string(),
+                        Color32::from_rgb(134, 239, 172),
+                        Color32::from_rgb(12, 38, 28),
+                        Color32::from_rgb(34, 197, 94),
+                    )
+                };
+
+                let status_pill = ui.label(
+                    egui::RichText::new(shape_thai(&status_text))
+                        .font(FontId::proportional(13.0))
+                        .color(status_color)
+                        .strong(),
+                );
+                let pill_rect = status_pill.rect.expand(8.0);
+                ui.painter()
+                    .rect_filled(pill_rect, Rounding::same(10.0), status_fill);
+                ui.painter().rect_stroke(
+                    pill_rect,
+                    Rounding::same(10.0),
+                    Stroke::new(1.0_f32, status_stroke),
+                );
+
+                ui.add_space(14.0);
+
+                // --- actions -----------------------------------------------------
+                ui.horizontal(|ui| {
+                    let check_label = if running {
+                        "⏳ กำลังตรวจสอบ..."
+                    } else {
+                        "🔍 ตรวจสอบอัปเดตเดี๋ยวนี้"
+                    };
+                    let check_btn = egui::Button::new(
+                        egui::RichText::new(shape_thai(check_label))
+                            .font(FontId::proportional(12.5))
+                            .color(Color32::WHITE)
+                            .strong(),
+                    )
+                    .fill(Color32::from_rgb(14, 116, 144))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(6, 182, 212)))
+                    .rounding(Rounding::same(8.0))
+                    .min_size(Vec2::new(190.0, 36.0));
+
+                    if ui.add_enabled(!running, check_btn).clicked() {
+                        let _ = self.event_tx.send(GuiEvent::CheckUpdate);
+                        self.state.set_toast("กำลังตรวจสอบอัปเดต...");
+                    }
+
+                    if let Some(info) = pending.as_ref() {
+                        let dl_btn = egui::Button::new(
+                            egui::RichText::new(format!("⬇️ ดาวน์โหลด v{}", info.latest))
+                                .font(FontId::proportional(12.5))
+                                .color(Color32::WHITE)
+                                .strong(),
+                        )
+                        .fill(Color32::from_rgb(22, 163, 74))
+                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(74, 222, 128)))
+                        .rounding(Rounding::same(8.0))
+                        .min_size(Vec2::new(170.0, 36.0));
+
+                        if ui.add(dl_btn).clicked() {
+                            let _ = self
+                                .event_tx
+                                .send(GuiEvent::OpenUrl(info.download_url.clone()));
+                        }
+                    }
+
+                    if ui
+                        .button("🌐 เปิดหน้า Releases")
+                        .on_hover_text("เปิดหน้า GitHub Releases ในเบราว์เซอร์")
+                        .clicked()
+                    {
+                        let _ = self.event_tx.send(GuiEvent::OpenUrl(format!(
+                            "https://github.com/{}/releases",
+                            crate::update::DEFAULT_REPO
+                        )));
+                    }
+                });
+
+                ui.add_space(12.0);
+
+                // --- release notes ------------------------------------------------
+                if let Some(info) = pending.as_ref() {
+                    ui.label(
+                        egui::RichText::new(format!("📝 {}", info.title))
+                            .font(FontId::proportional(12.5))
+                            .color(Color32::WHITE)
+                            .strong(),
+                    );
+                    ui.add_space(4.0);
+                    let notes = if info.notes.trim().is_empty() {
+                        "(ไม่มีรายละเอียดเพิ่มเติม)".to_string()
+                    } else {
+                        info.notes.clone()
+                    };
+                    egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(notes)
+                                    .font(FontId::proportional(11.5))
+                                    .color(Color32::from_rgb(203, 213, 225)),
+                            );
+                        });
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("📝 ดู Release Notes บน GitHub").clicked() {
+                            let _ = self
+                                .event_tx
+                                .send(GuiEvent::OpenUrl(info.release_url.clone()));
+                        }
+                        if ui
+                            .button("ข้ามเวอร์ชันนี้")
+                            .on_hover_text("ไม่แจ้งเตือนเวอร์ชันนี้อีก")
+                            .clicked()
+                        {
+                            let _ = self
+                                .event_tx
+                                .send(GuiEvent::SkipUpdateVersion(info.latest.to_string()));
+                            self.state.set_toast("ข้ามเวอร์ชันนี้แล้ว");
+                        }
+                    });
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // --- details ------------------------------------------------------
+                ui.label(
+                    egui::RichText::new("รายละเอียด")
+                        .font(FontId::proportional(12.0))
+                        .color(Color32::from_rgb(148, 163, 184))
+                        .strong(),
+                );
+                ui.label(
+                    egui::RichText::new(format!("• เวอร์ชันปัจจุบัน: v{}", current))
+                        .font(FontId::proportional(11.5))
+                        .color(Color32::from_rgb(203, 213, 225)),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "• ตรวจสอบล่าสุด: {}",
+                        last_check.unwrap_or_else(|| "ยังไม่เคยตรวจสอบ".to_string())
+                    ))
+                    .font(FontId::proportional(11.5))
+                    .color(Color32::from_rgb(203, 213, 225)),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "• ตรวจสอบอัตโนมัติทุก 15 นาที และเมื่อเปิดโปรแกรม (ตั้งค่าได้ใน Settings)",
+                    )
+                    .font(FontId::proportional(11.5))
+                    .color(Color32::from_rgb(203, 213, 225)),
+                );
+            });
     }
 
     fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
@@ -3770,6 +4003,22 @@ impl WisprFlowGui {
 
             ui.add_space(20.0);
         });
+    }
+
+    /// Handles a click on the update button: download the new release when there
+    /// is one, otherwise start a check.
+    fn trigger_update_action(&self, pending: &Option<UpdateInfo>) {
+        if let Some(info) = pending.as_ref() {
+            // Open the platform-appropriate download in the browser.
+            let _ = self
+                .event_tx
+                .send(GuiEvent::OpenUrl(info.download_url.clone()));
+            self.state
+                .set_toast(&format!("กำลังเปิดหน้าดาวน์โหลด v{}", info.latest));
+        } else {
+            let _ = self.event_tx.send(GuiEvent::CheckUpdate);
+            self.state.set_toast("กำลังตรวจสอบอัปเดต...");
+        }
     }
 
     /// Returns the pending update when it is newer than the running build and

@@ -51,6 +51,16 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.2" date="2026-10-22">
+      <description>
+        <p>Update discoverability:</p>
+        <ul>
+          <li>A dedicated Updates page in the sidebar</li>
+          <li>The update button is always visible in the top-right corner</li>
+          <li>Fixed the top bar collapsing the central panel</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.1" date="2026-10-22">
       <description>
         <p>Never transcribe silence:</p>

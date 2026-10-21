@@ -85,9 +85,9 @@ or `raw`.
 - **Auto-start** at login (Windows registry `Run` key / XDG autostart entry).
 - **Diagnostics** — rotating log files plus a panic hook, so a crash is
   reproducible by the user instead of vanishing.
-- **In-app update checker** — a dedicated **update button in the top bar**
-  (visible on every tab), a clickable version indicator in the sidebar and a
-  *Check for updates* entry in the system tray. It queries the GitHub release
+- **In-app update checker** — a dedicated **update button in the top-right of
+  every tab**, a full **🔄 Updates** page in the sidebar, a clickable version
+  indicator and a *Check for updates* entry in the system tray. It queries the GitHub release
   feed, shows the new version with release notes, and links to the right
   installer for your platform. Checks also run in the background every 15
   minutes while the app is open.

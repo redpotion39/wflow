@@ -1,6 +1,6 @@
 [package]
 name = "wflow"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Wflow Team"]
@@ -40,6 +40,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # Routes the crate through the stub platform backend so the macOS/other
 # build path is type-checked on every CI run.
 mock_check = []
+# Enables eframe's framebuffer screenshot support (used for UI verification).
+screenshot = ["eframe/__screenshot"]
 
 [dev-dependencies]
 tempfile = "3.13"
