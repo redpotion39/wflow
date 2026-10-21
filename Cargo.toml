@@ -64,4 +64,4 @@ windows = { version = "0.58", features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3", default-features = false, features = ["async-io"] }
 async-io = "2.6"
-x11rb = { version = "0.13", default-features = false, features = ["allow-unsafe-code"] }
+x11rb = { version = "0.14", default-features = false, features = ["allow-unsafe-code"] }
