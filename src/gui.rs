@@ -787,6 +787,10 @@ impl eframe::App for WisprFlowGui {
             self.last_seen_update = current_update;
             ctx.request_repaint();
         }
+        // egui only redraws on demand, so a background result can otherwise land
+        // on a stale frame. A cheap heartbeat keeps the status bar, the update
+        // button and the recording timer in sync.
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
 
         // In-window hotkey trigger (mirrors the configured global hotkey)
         let hotkey_vk = self
