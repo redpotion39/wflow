@@ -109,15 +109,20 @@ jobs:
         run: cargo build --release
 
       - name: Install Inno Setup
-        uses: crazy-max/ghaction-chocolatey@v3
-        with:
-          args: innosetup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup*\ISCC.exe",
+                                 "C:\Program Files\Inno Setup*\ISCC.exe" -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe not found after installing Inno Setup" }
+          "ISCC=$($iscc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Compile Setup.exe
-        shell: cmd
+        shell: pwsh
         run: |
-          set PATH=C:\Program Files (x86)\Inno Setup 6;%PATH%
-          iscc installer.iss
+          & $env:ISCC installer.iss
+          Get-ChildItem dist
 
       - name: Collect artifacts
         shell: pwsh
