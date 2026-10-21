@@ -57,19 +57,19 @@ jobs:
           sha256sum ./*.deb ./*.run ./*.tar.gz > SHA256SUMS.txt
 
       - name: Upload Debian Package (.deb) Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wflow-ubuntu-deb
           path: dist/*.deb
 
       - name: Upload Universal .run Installer Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wflow-linux-run-installer
           path: dist/*.run
 
       - name: Upload Linux Tarball Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wflow-linux-tarball
           path: dist/*.tar.gz
