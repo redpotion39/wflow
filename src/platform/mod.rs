@@ -11,6 +11,9 @@
 //! routes the whole crate through the stub, which is how CI verifies the
 //! macOS/other build.
 
+mod keys;
+pub use keys::vk_to_string;
+
 #[cfg(target_os = "windows")]
 pub mod windows;
 
@@ -45,10 +48,6 @@ pub mod mock {
         QuitApp,
         KeyRecorded(u8, crate::config::KeyCombo),
         AutostartToggled(bool),
-    }
-
-    pub fn vk_to_string(vk: u16) -> String {
-        format!("Key(0x{:02X})", vk)
     }
 
     pub struct PlatformManager;
