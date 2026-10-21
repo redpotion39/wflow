@@ -3156,6 +3156,13 @@ impl WisprFlowGui {
                         &mut self.settings_include_prerelease,
                         "รวมเวอร์ชันทดลอง (pre-release)",
                     );
+                    ui.label(
+                        egui::RichText::new(
+                            "  └ การเปลี่ยนแปลงในหน้านี้จะมีผลหลังกด Save All Preferences",
+                        )
+                        .font(FontId::proportional(10.5))
+                        .color(Color32::from_rgb(100, 116, 139)),
+                    );
                     ui.horizontal(|ui| {
                         ui.label("ตรวจสอบทุก ๆ:");
                         ui.add(
