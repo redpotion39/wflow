@@ -51,6 +51,16 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.2.1" date="2026-10-22">
+      <description>
+        <p>Maintenance release:</p>
+        <ul>
+          <li>Patch the rustls-webpki and webpki-roots advisories (RUSTSEC-2026-0381/0382)</li>
+          <li>Share one virtual-key naming table across every platform backend</li>
+          <li>Update arboard, x11rb and rusqlite</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-10-21">
       <description>
         <p>Security and reliability release:</p>
