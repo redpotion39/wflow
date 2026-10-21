@@ -8,6 +8,9 @@ pub enum SoundEffect {
 }
 
 static SOUND_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Only used by the non-Windows playback path.
+#[cfg(not(target_os = "windows"))]
 static PLAYBACK_WARNED: AtomicBool = AtomicBool::new(false);
 
 pub fn set_sound_enabled(enabled: bool) {
