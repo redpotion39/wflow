@@ -111,7 +111,7 @@ jobs:
       - name: Install Inno Setup
         uses: crazy-max/ghaction-chocolatey@v3
         with:
-          packages: innosetup
+          args: innosetup
 
       - name: Compile Setup.exe
         shell: cmd
@@ -136,7 +136,7 @@ jobs:
     name: Publish GitHub Release
     needs: [linux, windows]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' 
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
