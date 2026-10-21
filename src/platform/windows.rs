@@ -1367,7 +1367,7 @@ unsafe extern "system" fn hud_wnd_proc(
             let _ = DeleteObject(font);
 
             // Active Provider Badge
-            let badge_str = HUD_BADGE.lock().unwrap().clone();
+            let badge_str = HUD_BADGE.lock().unwrap_or_else(|e| e.into_inner()).clone();
             if !badge_str.is_empty() {
                 let badge_font = CreateFontW(
                     11,

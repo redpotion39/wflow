@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
@@ -39,6 +39,14 @@ pub enum GuiEvent {
     SkipUpdateVersion(String),
     OpenUrl(String),
     OpenLogFolder,
+}
+
+/// Locks a mutex, recovering from poisoning instead of panicking the GUI.
+///
+/// A panic in any worker thread would otherwise poison the shared state and
+/// take the whole interface down.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|err| err.into_inner())
 }
 
 /// Shared state between the async dictation engine and the GUI
@@ -241,7 +249,7 @@ impl WisprFlowGui {
             include_prerelease,
             update_interval_hours,
         ) = {
-            let cfg = state.config.lock().unwrap();
+            let cfg = lock(&state.config);
             (
                 cfg.endpoint_url.clone(),
                 cfg.auth_token.clone().unwrap_or_default(),
@@ -711,7 +719,7 @@ impl eframe::App for WisprFlowGui {
         }
 
         let (dictate_key_name, toggle_key_name) = {
-            let cfg = self.state.config.lock().unwrap();
+            let cfg = lock(&self.state.config);
             (
                 cfg.hotkey.format_display(),
                 cfg.toggle_window.format_display(),
@@ -749,8 +757,8 @@ impl eframe::App for WisprFlowGui {
         self.animation_time += 0.04;
 
         let is_rec = self.state.is_recording.load(Ordering::SeqCst);
-        let amplitude = *self.state.current_amplitude.lock().unwrap();
-        let status = *self.state.status.lock().unwrap();
+        let amplitude = *lock(&self.state.current_amplitude);
+        let status = *lock(&self.state.status);
 
         // Track live recording timer
         if is_rec {
@@ -973,8 +981,8 @@ impl WisprFlowGui {
             ui.add_space(10.0);
 
             // Navigation Menu
-            let history_count = self.state.history.lock().unwrap().len();
-            let dict_count = self.state.dictionary_entries.lock().unwrap().len();
+            let history_count = lock(&self.state.history).len();
+            let dict_count = lock(&self.state.dictionary_entries).len();
 
             let nav_items = [
                 (ActiveTab::Studio, "🎙️", "Live Studio", None),
@@ -1132,7 +1140,7 @@ impl WisprFlowGui {
                     .rounding(Rounding::same(9.0))
                     .inner_margin(egui::Margin::same(10.0))
                     .show(ui, |ui| {
-                        let cfg = self.state.config.lock().unwrap();
+                        let cfg = lock(&self.state.config);
                         let prov_badge = match cfg.stt_provider {
                             SttProvider::WisprFlow => {
                                 ("⚡ Wispr Flow", Color32::from_rgb(129, 140, 248))
@@ -1348,7 +1356,7 @@ impl WisprFlowGui {
 
                 ui.add_space(8.0);
 
-                let active_app = self.state.active_app.lock().unwrap().clone();
+                let active_app = lock(&self.state.active_app).clone();
                 let app_display = if active_app.process_name.is_empty() {
                     "Desktop".to_string()
                 } else {
@@ -1539,7 +1547,7 @@ impl WisprFlowGui {
                 ui.add_space(10.0);
 
                 // Detected Active Context Card
-                let active_app = self.state.active_app.lock().unwrap().clone();
+                let active_app = lock(&self.state.active_app).clone();
                 egui::Frame::none()
                     .fill(Color32::from_rgb(17, 23, 36))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
@@ -1606,7 +1614,7 @@ impl WisprFlowGui {
 
                 // Active STT Pipeline & Model Status Card
                 let (prov_title, model_name, prov_color) = {
-                    let cfg = self.state.config.lock().unwrap();
+                    let cfg = lock(&self.state.config);
                     match cfg.stt_provider {
                         SttProvider::WisprFlow => ("Wispr Flow Cloud".to_string(), "Native Stream (gRPC)".to_string(), Color32::from_rgb(129, 140, 248)),
                         SttProvider::Groq => ("Groq Cloud LPU".to_string(), cfg.groq_model.clone(), Color32::from_rgb(251, 146, 60)),
@@ -1673,7 +1681,7 @@ impl WisprFlowGui {
                                     .strong(),
                             );
 
-                            let latency = *self.state.last_latency.lock().unwrap();
+                            let latency = *lock(&self.state.last_latency);
                             if latency > 0.0 {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let lat_pill = ui.label(
@@ -1693,7 +1701,7 @@ impl WisprFlowGui {
 
                         ui.add_space(8.0);
 
-                        let transcript = self.state.last_transcript.lock().unwrap().clone();
+                        let transcript = lock(&self.state.last_transcript).clone();
 
                         egui::ScrollArea::vertical()
                             .max_height(190.0)
@@ -1773,7 +1781,7 @@ impl WisprFlowGui {
                                         .rounding(Rounding::same(6.0));
 
                                     if ui.add(clear_btn).clicked() {
-                                        *self.state.last_transcript.lock().unwrap() = String::new();
+                                        *lock(&self.state.last_transcript) = String::new();
                                         self.state.set_toast("Transcript cleared");
                                     }
                                 });
@@ -1784,7 +1792,7 @@ impl WisprFlowGui {
                 ui.add_space(10.0);
 
                 // Quick Stats Card
-                let history_count = self.state.history.lock().unwrap().len();
+                let history_count = lock(&self.state.history).len();
                 egui::Frame::none()
                     .fill(Color32::from_rgb(17, 23, 36))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
@@ -1810,7 +1818,7 @@ impl WisprFlowGui {
                 ui.add_space(10.0);
 
                 // Recent Activity Card (Mini History in Studio)
-                let recent_items: Vec<_> = self.state.history.lock().unwrap().iter().take(3).cloned().collect();
+                let recent_items: Vec<_> = lock(&self.state.history).iter().take(3).cloned().collect();
                 egui::Frame::none()
                     .fill(Color32::from_rgb(17, 23, 36))
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
@@ -1877,7 +1885,7 @@ impl WisprFlowGui {
     }
 
     fn render_history_tab(&mut self, ui: &mut egui::Ui) {
-        let history = self.state.history.lock().unwrap().clone();
+        let history = lock(&self.state.history).clone();
 
         // 1. Top Summary Banner
         let total_words: usize = history
@@ -2092,7 +2100,7 @@ impl WisprFlowGui {
     }
 
     fn render_dictionary_tab(&mut self, ui: &mut egui::Ui) {
-        let entries = self.state.dictionary_entries.lock().unwrap().clone();
+        let entries = lock(&self.state.dictionary_entries).clone();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             // CARD 1: Introduction & Add New Entry Form

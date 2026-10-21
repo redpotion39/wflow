@@ -533,12 +533,12 @@ impl PlatformManager {
 
     #[allow(dead_code)]
     pub fn get_hotkey_vk() -> u16 {
-        *HOTKEY_VK.lock().unwrap()
+        *HOTKEY_VK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[allow(dead_code)]
     pub fn get_toggle_window_vk() -> u16 {
-        *TOGGLE_VK.lock().unwrap()
+        *TOGGLE_VK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[allow(dead_code)]
