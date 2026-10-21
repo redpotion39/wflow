@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Ubuntu System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config libasound2-dev libssl-dev libx11-dev \
+            libxkbcommon-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev \
+            xdotool dpkg-dev
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build all Linux packages
+        run: bash packaging/linux/build-all.sh
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum ./*.deb ./*.run ./*.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload Debian Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: wflow-linux-deb
+          path: dist/*.deb
+
+      - name: Upload Universal .run Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: wflow-linux-run-installer
+          path: dist/*.run
+
+      - name: Upload Linux Tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: wflow-linux-tarball
+          path: dist/*.tar.gz
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.deb
+            dist/*.run
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+          body: |
+            ## Verification
+
+            ```bash
+            sha256sum -c SHA256SUMS.txt
+            ```

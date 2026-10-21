@@ -51,6 +51,11 @@ jobs:
       - name: Build All Linux Packages (.deb, .run, .tar.gz)
         run: bash packaging/linux/build-all.sh
 
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum ./*.deb ./*.run ./*.tar.gz > SHA256SUMS.txt
+
       - name: Upload Debian Package (.deb) Artifact
         uses: actions/upload-artifact@v4
         with:

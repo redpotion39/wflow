@@ -101,6 +101,20 @@ elif [ -f "./wflow.desktop" ]; then
     SRC_DESKTOP="./wflow.desktop"
 fi
 
+SRC_MANPAGE=""
+if [ -f "packaging/linux/wflow.1" ]; then
+    SRC_MANPAGE="packaging/linux/wflow.1"
+elif [ -f "./wflow.1" ]; then
+    SRC_MANPAGE="./wflow.1"
+fi
+
+SRC_METAINFO=""
+if [ -f "packaging/linux/wflow.metainfo.xml" ]; then
+    SRC_METAINFO="packaging/linux/wflow.metainfo.xml"
+elif [ -f "./wflow.metainfo.xml" ]; then
+    SRC_METAINFO="./wflow.metainfo.xml"
+fi
+
 # 3. Setup target directories
 if [ "$MODE" = "system" ]; then
     BIN_DIR="/usr/local/bin"
@@ -112,6 +126,16 @@ else
     DESKTOP_DIR="$HOME/.local/share/applications"
     ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
     PIXMAPS_DIR=""
+fi
+
+MAN_DIR=""
+META_DIR=""
+if [ "$MODE" = "system" ]; then
+    MAN_DIR="/usr/share/man/man1"
+    META_DIR="/usr/share/metainfo"
+else
+    MAN_DIR="$HOME/.local/share/man/man1"
+    META_DIR="$HOME/.local/share/metainfo"
 fi
 
 echo ">> Installing binary to $BIN_DIR/wflow..."
@@ -139,6 +163,18 @@ if [ -n "$SRC_DESKTOP" ]; then
     else
         install -m 644 "$SRC_DESKTOP" "$DESKTOP_DIR/wflow.desktop"
     fi
+fi
+
+if [ -n "$SRC_MANPAGE" ]; then
+    echo ">> Installing man page..."
+    install -d "$MAN_DIR"
+    install -m 644 "$SRC_MANPAGE" "$MAN_DIR/wflow.1"
+fi
+
+if [ -n "$SRC_METAINFO" ]; then
+    echo ">> Installing AppStream metadata..."
+    install -d "$META_DIR"
+    install -m 644 "$SRC_METAINFO" "$META_DIR/wflow.metainfo.xml"
 fi
 
 # 4. Update desktop & icon caches
@@ -174,4 +210,6 @@ fi
 echo "  • Run directly from terminal: wflow"
 echo "  • Launch from Application Menu: Search for 'Wflow'"
 echo "  • Background Tray Autostart: wflow --startup"
+echo "  • Check for updates: wflow --check-updates"
+echo "  • Config & secrets: ~/.config/wflow/  (or $XDG_CONFIG_HOME/wflow)"
 echo "=========================================================="

@@ -49,8 +49,11 @@ if [ "$MODE" = "system" ] || [ "$MODE" = "all" ]; then
     echo ">> Removing system-wide files..."
     rm -f /usr/local/bin/wflow /usr/bin/wflow
     rm -f /usr/share/applications/wflow.desktop
-    rm -f /usr/share/icons/hicolor/256x256/apps/wflow.png
+    rm -f /usr/share/metainfo/wflow.metainfo.xml
+    rm -f /usr/share/man/man1/wflow.1
+    rm -f /usr/share/icons/hicolor/*/apps/wflow.png
     rm -f /usr/share/pixmaps/wflow.png
+    rm -rf /usr/share/doc/wflow
     if which update-desktop-database >/dev/null 2>&1; then
         update-desktop-database -q /usr/share/applications 2>/dev/null || true
     fi
@@ -63,7 +66,9 @@ if [ "$MODE" = "user" ] || [ "$MODE" = "all" ]; then
     echo ">> Removing user-local files..."
     rm -f "$HOME/.local/bin/wflow"
     rm -f "$HOME/.local/share/applications/wflow.desktop"
-    rm -f "$HOME/.local/share/icons/hicolor/256x256/apps/wflow.png"
+    rm -f "$HOME/.local/share/metainfo/wflow.metainfo.xml"
+    rm -f "$HOME/.local/share/man/man1/wflow.1"
+    rm -f "$HOME/.local/share/icons/hicolor/"*/apps/wflow.png
     if which update-desktop-database >/dev/null 2>&1; then
         update-desktop-database -q "$HOME/.local/share/applications" 2>/dev/null || true
     fi
@@ -75,3 +80,7 @@ fi
 echo "=========================================================="
 echo "  Wflow has been successfully uninstalled."
 echo "=========================================================="
+echo "Your settings, history and secrets were kept in:"
+echo "  ~/.config/wflow/    (config.json, secrets.json)"
+echo "  ~/.local/share/wflow/ (flow.sqlite)"
+echo "Remove them manually if you no longer need your history."

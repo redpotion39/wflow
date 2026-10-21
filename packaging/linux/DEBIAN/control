@@ -1,12 +1,13 @@
 Package: wflow
-Version: 0.1.0
+Version: 0.2.0
 Section: utils
 Priority: optional
 Architecture: amd64
 Maintainer: Wflow Team <support@wflow.local>
 Depends: libc6 (>= 2.31), libasound2 (>= 1.2.0), libssl3 | libssl1.1, libx11-6, libxkbcommon0
-Recommends: xdotool, wl-clipboard | xclip, fonts-noto-core, fonts-thai-tlwg | fonts-tlwg, fonts-ipafont-gothic | fonts-noto-cjk
+Recommends: xdotool, alsa-utils | pulseaudio-utils, libnotify-bin, fonts-noto-core, fonts-thai-tlwg | fonts-tlwg, fonts-ipafont-gothic | fonts-noto-cjk
 Homepage: https://github.com/redpotion39/wflow
+Bugreport: https://github.com/redpotion39/wflow/issues
 Description: High-performance native Rust AI voice dictation studio
  Wflow is a lightweight, ultra-fast native speech-to-text voice dictation application
  featuring real-time gRPC streaming, Groq Whisper LPU, and ElevenLabs Scribe STT.

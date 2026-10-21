@@ -1,7 +1,33 @@
+# Rust / Cargo
 /target
-*.sqlite*
-*.json
-*.log
-!Cargo.lock
-/dist
+**/*.rs.bk
+*.pdb
 
+# Build artifacts
+/dist
+*.deb
+*.run
+*.tar.gz
+*.AppImage
+
+# Local runtime data
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+flow-rust.json
+secrets.json
+config.json
+!Cargo.lock
+!/packaging/**/*.json
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Tooling scratch directories
+/.agents
+/.gemini

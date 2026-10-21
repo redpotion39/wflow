@@ -1,10 +1,13 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tracing::info;
 
 use std::sync::Mutex;
+
+const SCHEMA_VERSION: i64 = 1;
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -23,44 +26,35 @@ pub struct HistoryRecord {
 }
 
 impl Database {
-    /// Opens the SQLite database at specified path or default `%APPDATA%\Wispr Flow\flow.sqlite`
+    /// Opens the SQLite database at the specified path or the default data dir.
     pub fn open_or_default(custom_path: Option<&Path>) -> Result<Self> {
         let path = match custom_path {
             Some(p) => p.to_path_buf(),
             None => {
-                #[cfg(target_os = "windows")]
-                {
-                    let app_data = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-                    let dir = PathBuf::from(app_data).join("Wispr Flow");
-                    let _ = std::fs::create_dir_all(&dir);
-                    dir.join("flow.sqlite")
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let data_dir = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-                        PathBuf::from(xdg).join("wflow")
-                    } else if let Ok(home) = std::env::var("HOME") {
-                        PathBuf::from(home).join(".local").join("share").join("wflow")
-                    } else {
-                        PathBuf::from(".")
-                    };
-                    let _ = std::fs::create_dir_all(&data_dir);
-                    data_dir.join("flow.sqlite")
-                }
+                let dir = crate::paths::ensure_dir(crate::paths::data_dir());
+                dir.join("flow.sqlite")
             }
         };
 
         info!("Opening SQLite database at: {:?}", path);
         let conn = Connection::open(&path).context("Failed to open SQLite database")?;
-        let db = Self { conn: Mutex::new(conn) };
+
+        // WAL keeps the GUI reads responsive while the worker writes.
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
+        let db = Self {
+            conn: Mutex::new(conn),
+        };
         db.init_tables()?;
         Ok(db)
     }
 
-    /// Initializes tables matching Wispr Flow schema
+    /// Initializes tables matching the Wispr Flow schema and applies migrations.
     pub fn init_tables(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let conn = self.lock();
+        conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS History (
                 transcriptEntityId VARCHAR(36) NOT NULL UNIQUE PRIMARY KEY,
@@ -86,12 +80,7 @@ impl Database {
                 transcriptOrigin TEXT,
                 platform VARCHAR(255)
             );
-            "#,
-            [],
-        )?;
 
-        conn.execute(
-            r#"
             CREATE TABLE IF NOT EXISTS Dictionary (
                 id VARCHAR(36) NOT NULL PRIMARY KEY,
                 word TEXT NOT NULL,
@@ -100,19 +89,37 @@ impl Database {
                 createdAt DATETIME,
                 updatedAt DATETIME
             );
+
+            CREATE INDEX IF NOT EXISTS idx_history_timestamp
+                ON History(timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_dictionary_word
+                ON Dictionary(word);
             "#,
-            [],
         )?;
+
+        let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version < SCHEMA_VERSION {
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            info!(
+                "Migrated database schema from version {} to {}",
+                version, SCHEMA_VERSION
+            );
+        }
 
         Ok(())
     }
 
-    /// Records a completed dictation into the History table
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        // Recover from a poisoned mutex instead of panicking the whole app.
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Records a completed dictation into the History table.
     pub fn save_history(&self, record: &HistoryRecord) -> Result<()> {
         let now: DateTime<Utc> = Utc::now();
         let num_words = record.formatted_text.split_whitespace().count() as i32;
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock();
         conn.execute(
             r#"
             INSERT OR REPLACE INTO History (
@@ -143,10 +150,10 @@ impl Database {
                 record.duration_secs,
                 num_words,
                 record.textbox_contents,
-                "rust-1.0.0",
+                APP_VERSION,
                 record.formatted_text,
                 "rust_native",
-                "win32",
+                std::env::consts::OS,
             ],
         )?;
 
@@ -154,12 +161,12 @@ impl Database {
         Ok(())
     }
 
-    /// Fetches recent dictation history ordered by timestamp descending
+    /// Fetches recent dictation history ordered by timestamp descending.
     pub fn get_recent_history(&self, limit: usize) -> Result<Vec<HistoryRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT transcriptEntityId, COALESCE(asrText, ''), COALESCE(formattedText, ''), COALESCE(app, ''), textboxContents, duration, e2eLatency, COALESCE(timestamp, '') 
-             FROM History ORDER BY timestamp DESC LIMIT ?1"
+            "SELECT transcriptEntityId, COALESCE(asrText, ''), COALESCE(formattedText, ''), COALESCE(app, ''), textboxContents, duration, e2eLatency, COALESCE(timestamp, '')
+             FROM History ORDER BY timestamp DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
             let duration: f64 = row.get::<_, Option<f64>>(5)?.unwrap_or(0.0);
@@ -177,40 +184,54 @@ impl Database {
         })?;
 
         let mut list = Vec::new();
-        for r in rows {
-            if let Ok(rec) = r {
-                list.push(rec);
+        for row in rows {
+            match row {
+                Ok(record) => list.push(record),
+                Err(err) => tracing::warn!("Skipping unreadable history row: {}", err),
             }
         }
         Ok(list)
     }
 
-    /// Deletes a history entry by transcriptEntityId
+    /// Deletes a history entry by transcriptEntityId.
     pub fn delete_history(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM History WHERE transcriptEntityId = ?1", params![id])?;
+        let conn = self.lock();
+        conn.execute(
+            "DELETE FROM History WHERE transcriptEntityId = ?1",
+            params![id],
+        )?;
         Ok(())
     }
 
-    /// Fetches all personal dictionary words
+    /// Removes every stored dictation (used by the privacy panel).
+    pub fn clear_history(&self) -> Result<usize> {
+        let conn = self.lock();
+        let removed = conn.execute("DELETE FROM History", [])?;
+        info!("Cleared {} history rows", removed);
+        Ok(removed)
+    }
+
+    /// Fetches all personal dictionary words.
     pub fn get_dictionary_words(&self) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock();
         let mut stmt = conn.prepare("SELECT word FROM Dictionary WHERE word IS NOT NULL")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
 
         let mut words = Vec::new();
-        for r in rows {
-            if let Ok(w) = r {
-                words.push(w);
+        for row in rows {
+            match row {
+                Ok(word) => words.push(word),
+                Err(err) => tracing::warn!("Skipping unreadable dictionary row: {}", err),
             }
         }
         Ok(words)
     }
 
-    /// Fetches all personal dictionary entries (words and snippets)
+    /// Fetches all personal dictionary entries (words and snippets).
     pub fn get_all_dictionary_entries(&self) -> Result<Vec<DictionaryEntry>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT id, word, replacement FROM Dictionary ORDER BY createdAt DESC")?;
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare("SELECT id, word, replacement FROM Dictionary ORDER BY createdAt DESC")?;
         let rows = stmt.query_map([], |row| {
             Ok(DictionaryEntry {
                 id: row.get(0)?,
@@ -220,19 +241,20 @@ impl Database {
         })?;
 
         let mut list = Vec::new();
-        for r in rows {
-            if let Ok(entry) = r {
-                list.push(entry);
+        for row in rows {
+            match row {
+                Ok(entry) => list.push(entry),
+                Err(err) => tracing::warn!("Skipping unreadable dictionary row: {}", err),
             }
         }
         Ok(list)
     }
 
-    /// Adds or replaces a dictionary vocabulary or snippet
+    /// Adds or replaces a dictionary vocabulary or snippet.
     pub fn add_dictionary_entry(&self, word: &str, replacement: Option<&str>) -> Result<()> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock();
         conn.execute(
             "INSERT INTO Dictionary (id, word, replacement, isStarred, createdAt, updatedAt) VALUES (?1, ?2, ?3, 0, ?4, ?4)",
             params![id, word.trim(), replacement.map(|s| s.trim()), now],
@@ -241,18 +263,20 @@ impl Database {
         Ok(())
     }
 
-    /// Deletes a dictionary entry by id
+    /// Deletes a dictionary entry by id.
     pub fn delete_dictionary_entry(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock();
         conn.execute("DELETE FROM Dictionary WHERE id = ?1", params![id])?;
         info!("Deleted dictionary entry {}", id);
         Ok(())
     }
 
-    /// Fetches all active text snippets (trigger -> replacement)
+    /// Fetches all active text snippets (trigger -> replacement).
     pub fn get_snippets(&self) -> Result<Vec<(String, String)>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT word, replacement FROM Dictionary WHERE replacement IS NOT NULL AND TRIM(replacement) != ''")?;
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT word, replacement FROM Dictionary WHERE replacement IS NOT NULL AND TRIM(replacement) != ''",
+        )?;
         let rows = stmt.query_map([], |row| {
             let word: String = row.get(0)?;
             let repl: String = row.get(1)?;
@@ -260,9 +284,10 @@ impl Database {
         })?;
 
         let mut list = Vec::new();
-        for r in rows {
-            if let Ok(pair) = r {
-                list.push(pair);
+        for row in rows {
+            match row {
+                Ok(pair) => list.push(pair),
+                Err(err) => tracing::warn!("Skipping unreadable snippet row: {}", err),
             }
         }
         Ok(list)
@@ -276,3 +301,77 @@ pub struct DictionaryEntry {
     pub replacement: Option<String>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db() -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open_or_default(Some(&dir.path().join("test.sqlite"))).unwrap();
+        (dir, db)
+    }
+
+    fn record(id: &str) -> HistoryRecord {
+        HistoryRecord {
+            transcript_id: id.to_string(),
+            asr_text: "hello".to_string(),
+            formatted_text: "Hello.".to_string(),
+            app: "test".to_string(),
+            textbox_contents: None,
+            duration_secs: 1.5,
+            e2e_latency_secs: 0.2,
+            timestamp: Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn stores_and_reads_history() {
+        let (_dir, db) = temp_db();
+        db.save_history(&record("a")).unwrap();
+        db.save_history(&record("b")).unwrap();
+        let rows = db.get_recent_history(10).unwrap();
+        assert_eq!(rows.len(), 2);
+        db.delete_history("a").unwrap();
+        assert_eq!(db.get_recent_history(10).unwrap().len(), 1);
+        assert_eq!(db.clear_history().unwrap(), 1);
+        assert!(db.get_recent_history(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dictionary_and_snippets() {
+        let (_dir, db) = temp_db();
+        db.add_dictionary_entry("Wflow", None).unwrap();
+        db.add_dictionary_entry("brb", Some("be right back"))
+            .unwrap();
+
+        let words = db.get_dictionary_words().unwrap();
+        assert!(words.contains(&"Wflow".to_string()));
+
+        let snippets = db.get_snippets().unwrap();
+        assert_eq!(
+            snippets,
+            vec![("brb".to_string(), "be right back".to_string())]
+        );
+
+        let entries = db.get_all_dictionary_entries().unwrap();
+        assert_eq!(entries.len(), 2);
+        db.delete_dictionary_entry(&entries[0].id).unwrap();
+        assert_eq!(db.get_all_dictionary_entries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn schema_version_is_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("version.sqlite");
+        let _db = Database::open_or_default(Some(&path)).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let journal: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal.to_lowercase(), "wal");
+    }
+}

@@ -26,8 +26,14 @@ mkdir -p "$STAGING_DIR/DEBIAN"
 mkdir -p "$STAGING_DIR/usr/bin"
 mkdir -p "$STAGING_DIR/usr/share/applications"
 mkdir -p "$STAGING_DIR/usr/share/icons/hicolor/256x256/apps"
+mkdir -p "$STAGING_DIR/usr/share/icons/hicolor/128x128/apps"
+mkdir -p "$STAGING_DIR/usr/share/icons/hicolor/64x64/apps"
+mkdir -p "$STAGING_DIR/usr/share/icons/hicolor/48x48/apps"
+mkdir -p "$STAGING_DIR/usr/share/icons/hicolor/32x32/apps"
 mkdir -p "$STAGING_DIR/usr/share/pixmaps"
 mkdir -p "$STAGING_DIR/usr/share/doc/wflow"
+mkdir -p "$STAGING_DIR/usr/share/metainfo"
+mkdir -p "$STAGING_DIR/usr/share/man/man1"
 
 # 3. Copy application files
 echo ">> Copying executable and desktop assets..."
@@ -38,11 +44,32 @@ strip --strip-unneeded "$STAGING_DIR/usr/bin/wflow"
 cp assets/icon_256.png "$STAGING_DIR/usr/share/icons/hicolor/256x256/apps/wflow.png"
 chmod 644 "$STAGING_DIR/usr/share/icons/hicolor/256x256/apps/wflow.png"
 
+for size in 128 64 48 32; do
+    if command -v convert >/dev/null 2>&1; then
+        convert assets/icon_256.png -resize ${size}x${size} \
+            "$STAGING_DIR/usr/share/icons/hicolor/${size}x${size}/apps/wflow.png"
+    else
+        cp assets/icon_256.png "$STAGING_DIR/usr/share/icons/hicolor/${size}x${size}/apps/wflow.png"
+    fi
+    chmod 644 "$STAGING_DIR/usr/share/icons/hicolor/${size}x${size}/apps/wflow.png"
+done
+
 cp assets/icon_256.png "$STAGING_DIR/usr/share/pixmaps/wflow.png"
 chmod 644 "$STAGING_DIR/usr/share/pixmaps/wflow.png"
 
 cp packaging/linux/wflow.desktop "$STAGING_DIR/usr/share/applications/wflow.desktop"
 chmod 644 "$STAGING_DIR/usr/share/applications/wflow.desktop"
+
+cp packaging/linux/wflow.metainfo.xml "$STAGING_DIR/usr/share/metainfo/wflow.metainfo.xml"
+chmod 644 "$STAGING_DIR/usr/share/metainfo/wflow.metainfo.xml"
+
+cp packaging/linux/wflow.1 "$STAGING_DIR/usr/share/man/man1/wflow.1"
+chmod 644 "$STAGING_DIR/usr/share/man/man1/wflow.1"
+
+cp README.md "$STAGING_DIR/usr/share/doc/wflow/README.md"
+chmod 644 "$STAGING_DIR/usr/share/doc/wflow/README.md"
+cp LICENSE "$STAGING_DIR/usr/share/doc/wflow/copyright"
+chmod 644 "$STAGING_DIR/usr/share/doc/wflow/copyright"
 
 # 4. Copy DEBIAN control and maintainer scripts
 echo ">> Setting up Debian control scripts..."
@@ -57,7 +84,8 @@ chmod 755 "$STAGING_DIR/DEBIAN/postrm"
 
 # 5. Build .deb package using dpkg-deb
 mkdir -p dist
-OUTPUT_DEB="dist/wflow_0.1.0_amd64.deb"
+VERSION="$(grep -m1 '^version' "$ROOT_DIR/Cargo.toml" | cut -d'"' -f2)"
+OUTPUT_DEB="dist/wflow_${VERSION}_amd64.deb"
 
 echo ">> Packing Debian archive..."
 dpkg-deb --build --root-owner-group "$STAGING_DIR" "$OUTPUT_DEB"

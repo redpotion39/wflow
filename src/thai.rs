@@ -295,7 +295,10 @@ mod tests {
         // ผู้ใหญ่ -> ผ + ู + ้ (lowered) + ใ + ห + ญ + ่ (lowered)
         let shaped = shape_thai("ผู้ใหญ่");
         let codepoints: Vec<u32> = shaped.chars().map(|c| c as u32).collect();
-        assert_eq!(codepoints, vec![0x0E1C, 0x0E39, 0xF70B, 0x0E43, 0x0E2B, 0x0E0D, 0xF70A]);
+        assert_eq!(
+            codepoints,
+            vec![0x0E1C, 0x0E39, 0xF70B, 0x0E43, 0x0E2B, 0x0E0D, 0xF70A]
+        );
     }
 
     #[test]

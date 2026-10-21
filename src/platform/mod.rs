@@ -82,8 +82,15 @@ pub mod mock {
         pub fn set_hud_status(_status: crate::ui::DictationStatus) {}
         pub fn update_hud_amplitude(_amp: f32) {}
         pub fn hide_floating_hud() {}
-        pub fn is_autostart_enabled() -> bool { false }
-        pub fn set_autostart(_enable: bool) -> Result<()> { Ok(()) }
+        pub fn is_autostart_enabled() -> bool {
+            false
+        }
+        pub fn set_autostart(_enable: bool) -> Result<()> {
+            Ok(())
+        }
+        pub fn open_url(_url: &str) -> Result<()> {
+            Ok(())
+        }
     }
 }
 

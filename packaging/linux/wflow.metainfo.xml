@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>wflow.desktop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>Wflow</name>
+  <summary>High-performance native AI voice dictation</summary>
+
+  <description>
+    <p>
+      Wflow is a lightweight native dictation studio written in Rust. It captures
+      your microphone, streams it to a speech-to-text provider of your choice and
+      pastes the transcript straight into the focused text box.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Multiple speech-to-text engines: Wispr Flow (gRPC streaming), Groq Whisper and ElevenLabs Scribe</li>
+      <li>Global push-to-talk hotkey with full modifier combinations</li>
+      <li>Floating HUD overlay with a live microphone waveform</li>
+      <li>Optional AI post-processing for punctuation, cleanup and formatting</li>
+      <li>Local SQLite history plus a personal vocabulary and snippet dictionary</li>
+      <li>System tray integration, auto-start and an in-app update checker</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">wflow.desktop</launchable>
+
+  <categories>
+    <category>Utility</category>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+  </categories>
+
+  <keywords>
+    <keyword>voice</keyword>
+    <keyword>dictation</keyword>
+    <keyword>speech</keyword>
+    <keyword>stt</keyword>
+    <keyword>transcribe</keyword>
+    <keyword>ai</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/redpotion39/wflow</url>
+  <url type="bugtracker">https://github.com/redpotion39/wflow/issues</url>
+
+  <provides>
+    <binary>wflow</binary>
+  </provides>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.2.0" date="2026-10-21">
+      <description>
+        <p>Security and reliability release:</p>
+        <ul>
+          <li>Credentials are stored in a separate 0600 secrets file instead of the config file</li>
+          <li>The embedded gateway key has been removed; supply your own</li>
+          <li>Privacy controls for text-context sharing and local history retention</li>
+          <li>Native global hotkeys on Linux (X11/XWayland)</li>
+          <li>Floating HUD on Linux, earcon playback on Linux and macOS</li>
+          <li>Diagnostic log files, single-instance guard and graceful shutdown</li>
+          <li>In-app update checker with release notes and platform download links</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+</component>

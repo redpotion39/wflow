@@ -6,38 +6,46 @@ use tracing::{error, info, warn};
 use windows::core::Interface;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateBitmap, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
-    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, InvalidateRect,
-    RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TextOutW, FW_BOLD, FW_NORMAL,
-    PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT,
+    BeginPaint, BitBlt, CreateBitmap, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
+    CreatePen, CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint,
+    InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TextOutW,
+    FW_BOLD, FW_NORMAL, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
-    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ,
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
+    HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ,
 };
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
-use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, IUIAutomationValuePattern, UIA_ValuePatternId};
+use windows::Win32::UI::Accessibility::{
+    CUIAutomation, IUIAutomation, IUIAutomationValuePattern, UIA_ValuePatternId,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     VK_CONTROL, VK_V,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NOTIFYICONDATAW, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIF_ICON, NIF_MESSAGE, NIF_TIP,
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CallNextHookEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DispatchMessageW, EnumWindows, FindWindowW, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
-    GetMessageW, GetSystemMetrics, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, KillTimer,
-    LoadIconW, LoadImageW, PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos, SetWindowsHookExW,
-    ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, HICON, HWND_TOP, ICONINFO, IDI_APPLICATION,
-    IMAGE_ICON, KBDLLHOOKSTRUCT, LR_DEFAULTCOLOR, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, SM_CXSCREEN, SM_CXSMICON, SM_CYSCREEN, SM_CYSMICON,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
-    WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETICON, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
+    AppendMenuW, CallNextHookEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW,
+    DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, FindWindowW, GetClassNameW,
+    GetClientRect, GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics,
+    GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, KillTimer, LoadIconW, LoadImageW,
+    PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos,
+    SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, HICON,
+    HWND_TOP, ICONINFO, IDI_APPLICATION, IMAGE_ICON, KBDLLHOOKSTRUCT, LR_DEFAULTCOLOR, MF_CHECKED,
+    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, SM_CXSCREEN, SM_CXSMICON, SM_CYSCREEN, SM_CYSMICON,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_APP, WM_CLOSE,
+    WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_PAINT,
+    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETICON, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
 };
 
 use crate::ui::DictationStatus;
@@ -66,7 +74,8 @@ pub enum HotkeyEvent {
 }
 
 // Global hook callback state
-static HOOK_TX: std::sync::Mutex<Option<mpsc::UnboundedSender<HotkeyEvent>>> = std::sync::Mutex::new(None);
+static HOOK_TX: std::sync::Mutex<Option<mpsc::UnboundedSender<HotkeyEvent>>> =
+    std::sync::Mutex::new(None);
 static HOTKEY_DOWN: AtomicBool = AtomicBool::new(false);
 static TOGGLE_DOWN: AtomicBool = AtomicBool::new(false);
 static HOTKEY_COMBO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x77); // Default F8 (single)
@@ -161,7 +170,9 @@ pub fn vk_to_string(vk: u16) -> String {
         0x41..=0x5A => format!("{}", (vk as u8) as char),
         _ => {
             unsafe {
-                use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyNameTextW, MapVirtualKeyW, MAPVK_VK_TO_VSC};
+                use windows::Win32::UI::Input::KeyboardAndMouse::{
+                    GetKeyNameTextW, MapVirtualKeyW, MAPVK_VK_TO_VSC,
+                };
                 let sc = MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC);
                 if sc > 0 {
                     let lparam = (sc << 16) as i32;
@@ -224,7 +235,9 @@ impl PlatformManager {
             let mut pid = 0u32;
             GetWindowThreadProcessId(hwnd, Some(&mut pid));
             if pid > 0 {
-                if let Ok(handle) = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) {
+                if let Ok(handle) =
+                    OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid)
+                {
                     let mut proc_buf = [0u16; 1024];
                     let proc_len = K32GetModuleFileNameExW(handle, None, &mut proc_buf);
                     if proc_len > 0 {
@@ -240,7 +253,9 @@ impl PlatformManager {
             }
 
             // UI Automation for focused textbox
-            if let Ok(automation) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+            if let Ok(automation) =
+                CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+            {
                 if let Ok(focused) = automation.GetFocusedElement() {
                     if let Ok(pattern_obj) = focused.GetCurrentPattern(UIA_ValuePatternId) {
                         if let Ok(value_pattern) = pattern_obj.cast::<IUIAutomationValuePattern>() {
@@ -262,15 +277,42 @@ impl PlatformManager {
         ctx
     }
 
+    /// Opens a URL or local folder in the user's default handler.
+    pub fn open_url(url: &str) -> Result<()> {
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+        let operation: Vec<u16> = "open\0".encode_utf16().collect();
+        unsafe {
+            let result = ShellExecuteW(
+                HWND(std::ptr::null_mut()),
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(wide.as_ptr()),
+                None::<&PCWSTR>,
+                None::<&PCWSTR>,
+                SW_SHOWNORMAL,
+            );
+            if result.0 as isize <= 32 {
+                anyhow::bail!("ShellExecuteW failed for {}", url);
+            }
+        }
+        Ok(())
+    }
+
     /// Simulates pasting the given text into the currently focused window
     pub fn paste_text(text: &str) -> Result<()> {
         info!("Inserting text: '{}'", text);
 
         // 1. Copy text to clipboard via arboard
-        let mut clipboard = arboard::Clipboard::new().context("Failed to access system clipboard")?;
+        let mut clipboard =
+            arboard::Clipboard::new().context("Failed to access system clipboard")?;
         let prev_text = clipboard.get_text().ok();
 
-        clipboard.set_text(text).context("Failed to write text to clipboard")?;
+        clipboard
+            .set_text(text)
+            .context("Failed to write text to clipboard")?;
 
         // 2. Small delay to ensure clipboard is populated
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -378,9 +420,16 @@ impl PlatformManager {
                 windows::core::PCWSTR(class_name.as_ptr()),
                 windows::core::w!("WisprFlowTrayMsgWindow"),
                 WS_OVERLAPPED,
-                0, 0, 0, 0,
-                None, None, None, None,
-            ).unwrap_or_default();
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_or_default();
 
             TRAY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
 
@@ -405,9 +454,16 @@ impl PlatformManager {
                 windows::core::PCWSTR(hud_class_name.as_ptr()),
                 windows::core::w!("WisprFlowFloatingHudWindow"),
                 WS_POPUP,
-                hud_x, hud_y, hud_w, hud_h,
-                None, None, None, None,
-            ).unwrap_or_default();
+                hud_x,
+                hud_y,
+                hud_w,
+                hud_h,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_or_default();
 
             let rgn = CreateRoundRectRgn(0, 0, hud_w + 1, hud_h + 1, 28, 28);
             let _ = SetWindowRgn(hud_hwnd, rgn, true);
@@ -439,12 +495,7 @@ impl PlatformManager {
                 initial_toggle.format_display()
             );
 
-            let hook = SetWindowsHookExW(
-                WH_KEYBOARD_LL,
-                Some(low_level_keyboard_proc),
-                None,
-                0,
-            );
+            let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), None, 0);
 
             if let Ok(h) = hook {
                 info!(
@@ -605,7 +656,10 @@ impl PlatformManager {
                         return icon;
                     }
                 }
-                if let Ok(icon) = LoadIconW(hmodule, windows::core::PCWSTR(resource_id as usize as *const u16)) {
+                if let Ok(icon) = LoadIconW(
+                    hmodule,
+                    windows::core::PCWSTR(resource_id as usize as *const u16),
+                ) {
                     if !icon.is_invalid() && icon.0 != std::ptr::null_mut() {
                         return icon;
                     }
@@ -741,7 +795,10 @@ impl PlatformManager {
                     let _ = SetWindowPos(
                         hwnd,
                         HWND_TOP,
-                        0, 0, 0, 0,
+                        0,
+                        0,
+                        0,
+                        0,
                         SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
                     );
                     let _ = SetForegroundWindow(hwnd);
@@ -762,7 +819,10 @@ impl PlatformManager {
                 let _ = SetWindowPos(
                     hwnd,
                     HWND_TOP,
-                    0, 0, 0, 0,
+                    0,
+                    0,
+                    0,
+                    0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
                 );
                 let _ = SetForegroundWindow(hwnd);
@@ -802,7 +862,10 @@ impl PlatformManager {
                 found: None,
             };
 
-            unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> windows::Win32::Foundation::BOOL {
+            unsafe extern "system" fn enum_proc(
+                hwnd: HWND,
+                lparam: LPARAM,
+            ) -> windows::Win32::Foundation::BOOL {
                 let p = lparam.0 as *mut EnumCtx;
                 let mut pid = 0u32;
                 GetWindowThreadProcessId(hwnd, Some(&mut pid));
@@ -810,7 +873,9 @@ impl PlatformManager {
                     let mut class_name = [0u16; 256];
                     let len = GetClassNameW(hwnd, &mut class_name);
                     let class_str = String::from_utf16_lossy(&class_name[..len as usize]);
-                    if !class_str.contains("WisprFlowTrayMsg") && !class_str.contains("WflowTrayMsg") {
+                    if !class_str.contains("WisprFlowTrayMsg")
+                        && !class_str.contains("WflowTrayMsg")
+                    {
                         (*p).found = Some(hwnd);
                         return windows::Win32::Foundation::BOOL(0);
                     }
@@ -831,14 +896,8 @@ impl PlatformManager {
             if RegOpenKeyExW(HKEY_CURRENT_USER, subkey, 0, KEY_QUERY_VALUE, &mut hkey).is_ok() {
                 let value_name = windows::core::w!("Wflow");
                 let mut data_len = 0u32;
-                let query_res = RegQueryValueExW(
-                    hkey,
-                    value_name,
-                    None,
-                    None,
-                    None,
-                    Some(&mut data_len),
-                );
+                let query_res =
+                    RegQueryValueExW(hkey, value_name, None, None, None, Some(&mut data_len));
                 let _ = RegCloseKey(hkey);
                 if query_res.is_ok() && data_len > 0 {
                     return true;
@@ -874,19 +933,11 @@ impl PlatformManager {
                 let exe_path = std::env::current_exe()?;
                 let val_str = format!("\"{}\" --startup\0", exe_path.to_string_lossy());
                 let val_wide: Vec<u16> = val_str.encode_utf16().collect();
-                let byte_slice = std::slice::from_raw_parts(
-                    val_wide.as_ptr() as *const u8,
-                    val_wide.len() * 2,
-                );
+                let byte_slice =
+                    std::slice::from_raw_parts(val_wide.as_ptr() as *const u8, val_wide.len() * 2);
 
                 RegOpenKeyExW(HKEY_CURRENT_USER, subkey, 0, KEY_SET_VALUE, &mut hkey).ok()?;
-                let res = RegSetValueExW(
-                    hkey,
-                    value_name,
-                    0,
-                    REG_SZ,
-                    Some(byte_slice),
-                );
+                let res = RegSetValueExW(hkey, value_name, 0, REG_SZ, Some(byte_slice));
                 let _ = RegCloseKey(hkey);
                 res.ok()?;
                 info!("Enabled Windows autostart: {:?}", val_str);
@@ -935,7 +986,12 @@ unsafe extern "system" fn tray_wnd_proc(
                 let open_str = format!("Open Wflow ({})\0", toggle_name);
                 let open_wide: Vec<u16> = open_str.encode_utf16().collect();
 
-                let _ = AppendMenuW(hmenu, MF_STRING, 1, windows::core::PCWSTR(open_wide.as_ptr()));
+                let _ = AppendMenuW(
+                    hmenu,
+                    MF_STRING,
+                    1,
+                    windows::core::PCWSTR(open_wide.as_ptr()),
+                );
                 let _ = AppendMenuW(hmenu, MF_STRING, 2, windows::core::w!("Hide to Tray"));
                 let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
 
@@ -946,8 +1002,18 @@ unsafe extern "system" fn tray_wnd_proc(
                     "Start Wflow on Windows Startup\0"
                 };
                 let autostart_wide: Vec<u16> = autostart_str.encode_utf16().collect();
-                let autostart_flags = MF_STRING | if is_autostart { MF_CHECKED } else { MF_UNCHECKED };
-                let _ = AppendMenuW(hmenu, autostart_flags, 4, windows::core::PCWSTR(autostart_wide.as_ptr()));
+                let autostart_flags = MF_STRING
+                    | if is_autostart {
+                        MF_CHECKED
+                    } else {
+                        MF_UNCHECKED
+                    };
+                let _ = AppendMenuW(
+                    hmenu,
+                    autostart_flags,
+                    4,
+                    windows::core::PCWSTR(autostart_wide.as_ptr()),
+                );
 
                 let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
                 let _ = AppendMenuW(hmenu, MF_STRING, 3, windows::core::w!("Exit Application"));
@@ -1020,11 +1086,14 @@ unsafe extern "system" fn low_level_keyboard_proc(
         let rec_mode = RECORDING_MODE.load(Ordering::SeqCst);
         if rec_mode != 0 {
             if is_down {
-                if vk_code == 0x1B /* Escape */ {
+                if vk_code == 0x1B
+                /* Escape */
+                {
                     RECORDING_MODE.store(0, Ordering::SeqCst);
                     if let Ok(guard) = HOOK_TX.lock() {
                         if let Some(tx) = guard.as_ref() {
-                            let _ = tx.send(HotkeyEvent::KeyRecorded(rec_mode, KeyCombo::single(0)));
+                            let _ =
+                                tx.send(HotkeyEvent::KeyRecorded(rec_mode, KeyCombo::single(0)));
                         }
                     }
                     return LRESULT(1); // Suppress Escape
@@ -1080,10 +1149,14 @@ unsafe extern "system" fn low_level_keyboard_proc(
         // Check Dictation Hotkey
         let is_hotkey_base = matches_vk(vk_code, hotkey.key);
         if is_hotkey_base || (HOTKEY_DOWN.load(Ordering::SeqCst) && is_up) {
-            let ctrl_matches = hotkey.ctrl == current_ctrl_pressed() || (hotkey.ctrl && matches!(vk_code, 0x11 | 0xA2 | 0xA3));
-            let alt_matches = hotkey.alt == current_alt_pressed() || (hotkey.alt && matches!(vk_code, 0x12 | 0xA4 | 0xA5));
-            let shift_matches = hotkey.shift == current_shift_pressed() || (hotkey.shift && matches!(vk_code, 0x10 | 0xA0 | 0xA1));
-            let win_matches = hotkey.win == current_win_pressed() || (hotkey.win && matches!(vk_code, 0x5B | 0x5C));
+            let ctrl_matches = hotkey.ctrl == current_ctrl_pressed()
+                || (hotkey.ctrl && matches!(vk_code, 0x11 | 0xA2 | 0xA3));
+            let alt_matches = hotkey.alt == current_alt_pressed()
+                || (hotkey.alt && matches!(vk_code, 0x12 | 0xA4 | 0xA5));
+            let shift_matches = hotkey.shift == current_shift_pressed()
+                || (hotkey.shift && matches!(vk_code, 0x10 | 0xA0 | 0xA1));
+            let win_matches = hotkey.win == current_win_pressed()
+                || (hotkey.win && matches!(vk_code, 0x5B | 0x5C));
 
             let all_modifiers_match = ctrl_matches && alt_matches && shift_matches && win_matches;
 
@@ -1123,10 +1196,14 @@ unsafe extern "system" fn low_level_keyboard_proc(
         // Check Window Toggle Hotkey
         let is_toggle_base = matches_vk(vk_code, toggle.key);
         if is_toggle_base || (TOGGLE_DOWN.load(Ordering::SeqCst) && is_up) {
-            let ctrl_matches = toggle.ctrl == current_ctrl_pressed() || (toggle.ctrl && matches!(vk_code, 0x11 | 0xA2 | 0xA3));
-            let alt_matches = toggle.alt == current_alt_pressed() || (toggle.alt && matches!(vk_code, 0x12 | 0xA4 | 0xA5));
-            let shift_matches = toggle.shift == current_shift_pressed() || (toggle.shift && matches!(vk_code, 0x10 | 0xA0 | 0xA1));
-            let win_matches = toggle.win == current_win_pressed() || (toggle.win && matches!(vk_code, 0x5B | 0x5C));
+            let ctrl_matches = toggle.ctrl == current_ctrl_pressed()
+                || (toggle.ctrl && matches!(vk_code, 0x11 | 0xA2 | 0xA3));
+            let alt_matches = toggle.alt == current_alt_pressed()
+                || (toggle.alt && matches!(vk_code, 0x12 | 0xA4 | 0xA5));
+            let shift_matches = toggle.shift == current_shift_pressed()
+                || (toggle.shift && matches!(vk_code, 0x10 | 0xA0 | 0xA1));
+            let win_matches = toggle.win == current_win_pressed()
+                || (toggle.win && matches!(vk_code, 0x5B | 0x5C));
 
             let all_modifiers_match = ctrl_matches && alt_matches && shift_matches && win_matches;
 
@@ -1220,11 +1297,7 @@ unsafe extern "system" fn hud_wnd_proc(
                     COLORREF(0x001E551E), // Soft green aura
                     "Inserted!",
                 ),
-                _ => (
-                    COLORREF(0x00888888),
-                    COLORREF(0x00333333),
-                    "Ready",
-                ),
+                _ => (COLORREF(0x00888888), COLORREF(0x00333333), "Ready"),
             };
 
             let null_pen = CreatePen(PS_NULL, 0, COLORREF(0));
@@ -1269,9 +1342,19 @@ unsafe extern "system" fn hud_wnd_proc(
 
             // Status Text (Segoe UI Bold 15px)
             let font = CreateFontW(
-                15, 0, 0, 0,
+                15,
+                0,
+                0,
+                0,
                 FW_BOLD.0 as i32,
-                0, 0, 0, 0, 0, 0, 0, 0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 windows::core::w!("Segoe UI"),
             );
             let old_font = SelectObject(mem_dc, font);
@@ -1287,9 +1370,19 @@ unsafe extern "system" fn hud_wnd_proc(
             let badge_str = HUD_BADGE.lock().unwrap().clone();
             if !badge_str.is_empty() {
                 let badge_font = CreateFontW(
-                    11, 0, 0, 0,
+                    11,
+                    0,
+                    0,
+                    0,
                     FW_NORMAL.0 as i32,
-                    0, 0, 0, 0, 0, 0, 0, 0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
                     windows::core::w!("Segoe UI"),
                 );
                 let old_font2 = SelectObject(mem_dc, badge_font);

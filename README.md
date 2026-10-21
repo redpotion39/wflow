@@ -1,174 +1,256 @@
-# Wispr Flow Rust (`wispr-flow-rust`)
+# Wflow
 
-A native, lightweight, ultra-fast Rust rewrite and client for Wispr Flow dictation, reverse-engineered using **MCP REA**.
+**High-performance native AI voice dictation, written in Rust.**
 
-Replaces the resource-heavy Electron (~400MB RAM) and .NET NativeAOT multi-process pipeline with a **single, zero-runtime native Rust executable (~12MB RAM)**.
+Wflow captures your microphone while you hold a global push-to-talk hotkey,
+streams the audio to the speech-to-text provider of your choice, and pastes the
+transcript straight into whatever text box was focused. A single native
+executable replaces the 400 MB Electron client — typical idle memory is around
+12 MB.
 
----
-
-## ⚡ Key Features
-
-- **Multi-Provider Speech-to-Text (STT) AI Engines**:
-  - **⚡ Wispr Flow Cloud**: Native bidirectional gRPC Protobuf streaming over HTTP/2.
-  - **🚀 Groq Whisper (v3 Turbo)**: Ultra-low latency cloud STT via Groq's high-throughput LPU API.
-  - **🎙️ ElevenLabs Scribe STT**: State-of-the-art multilingual speech recognition.
-  - Switch providers with 1 click in Settings tab with automatic API key & model management.
-- **Floating Overlay HUD & Waveform Indicator**:
-  - Lightweight native Windows Topmost floating pill that automatically appears at the bottom-center of the screen during dictation.
-  - Dynamic status dot (Pulsing Red for Listening, Purple for Transcribing, Green for Done/Inserted).
-  - Provider badge displaying active AI service (`Wispr`, `Groq`, `11Labs`).
-  - Real-time double-buffered 7-bar audio waveform animating directly to microphone volume.
-  - Smoothly auto-dismisses after dictation finishes.
-- **Modern Sleek Desktop GUI & System Tray**:
-  - High-performance 60 FPS hardware-accelerated GUI built with `egui` / `eframe`.
-  - **Taskbar System Tray Integration**: Lives unobtrusively in the Windows Notification Area. Closing the window minimizes it to tray.
-  - **Global Window Toggle (`F9`)**: Press `F9` anywhere in Windows to instantly show or hide the Wispr Flow Studio.
-  - **Customizable Global Hotkeys**: Interactive hotkey recording modal to set any key for dictation and window toggle.
-  - **Tray Context Menu**: Left-click to toggle, right-click for quick actions ("Open", "Hide", "Exit").
-  - **Full Thai Font Support**: Integrates native Windows Leelawadee UI & Tahoma fonts for crisp Thai rendering.
-  - **Live Audio Studio**: 32-bar animated waveform visualizer reacting in real time to microphone volume.
-  - **Context-Aware HUD**: Displays detected active app (`chrome.exe`, `code.exe`, `notepad.exe`) and surrounding text context.
-  - **Interactive History**: Searchable card list of all past dictations with 1-click copy to clipboard.
-  - **Settings Manager**: Customize push-to-talk hotkey, transcription language, cloud endpoints, and auto-paste behaviors.
-- **Blazing Fast & Lightweight**: Uses ~12 MB of memory compared to >350 MB for the official Electron client.
-- **Low-Level Native Windows Integration**:
-  - Global low-level keyboard hook (`WH_KEYBOARD_LL`) for push-to-talk dictation anywhere in Windows.
-  - Windows UI Automation (`IUIAutomation`) to capture current text box context (`before_text`, `after_text`, `process_name`).
-  - Synthetic input pasting via `SendInput` and clipboard.
-- **Real-Time 16kHz Audio Pipeline**:
-  - Built with `cpal` directly interfacing with Windows WASAPI.
-  - Dynamic sample-rate conversion to 16,000 Hz 16-bit mono PCM.
-- **Local SQLite History & Dictionary**:
-  - Automatically stores dictation history and vocabulary matching the original `flow.sqlite` schema.
+> **Unofficial project.** Wflow is not affiliated with, endorsed by, or
+> connected to Wispr Flow, Baseten, Groq or ElevenLabs. You supply your own
+> account and API keys and are responsible for complying with each provider's
+> terms of service.
 
 ---
 
-## 📁 Project Structure
+## ✨ Features
 
-```
-D:\project\wme
-├── proto/
-│   └── flow_api.proto         # Reconstructed Protobuf definition
-├── src/
-│   ├── proto.rs               # Prost message definitions matching flow_api.v1
-│   ├── grpc.rs                # Tonic gRPC streaming client
-│   ├── audio.rs               # cpal 16kHz audio capture & RMS meter
-│   ├── gui.rs                 # Modern egui GUI (Studio, History, Settings)
-│   ├── platform/
-│   │   ├── mod.rs             # Cross-platform interface
-│   │   └── windows.rs         # Win32 keyboard hook, UI Automation & SendInput
-│   ├── db.rs                  # SQLite history & dictionary manager
-│   ├── config.rs              # JSON configuration
-│   ├── ui.rs                  # Dictation status definitions
-│   └── main.rs                # Multi-threaded async runtime orchestrator
-├── Cargo.toml                 # Dependencies and build settings
-└── README.md
-```
+### Speech-to-text engines (switchable in Settings)
+
+| Provider | Transport | Notes |
+|---|---|---|
+| **Wispr Flow** | Bidirectional gRPC (Protobuf) over HTTP/2 | Lowest latency streaming, needs your account JWT |
+| **Groq Whisper** | HTTPS multipart upload | Whisper v3 Turbo on Groq LPU, ~200 ms per utterance |
+| **ElevenLabs Scribe** | HTTPS multipart upload | State-of-the-art multilingual accuracy |
+
+### Dictation
+
+- **Global push-to-talk hotkey** with full modifier combinations (`Ctrl+Space`,
+  `Alt+Space`, `Ctrl+Shift+D`, …) — captured by a low-level `WH_KEYBOARD_LL`
+  hook on Windows and by an X11/XWayland keyboard watcher on Linux.
+- **Tap-to-toggle mode** as an alternative to push-to-talk.
+- **Floating HUD overlay** with a live microphone waveform, provider badge and
+  status colour (red = listening, purple = transcribing, green = inserted).
+  Native topmost window on Windows, transparent egui viewport elsewhere.
+- **Context-aware dictation** — the active application and surrounding text can
+  be sent to the provider (opt-in, see *Privacy*).
+- **Thai typography normalisation** — combining vowels and tone marks are
+  repositioned so Thai renders correctly in the GUI and in pasted text.
+- **Auto-paste** through the clipboard plus synthetic `Ctrl+V`, with a
+  configurable safety limit on recording length.
+
+### AI post-processing (optional)
+
+Raw transcripts can be polished by Groq's `llama-3.1-8b-instant` with one of
+six styles: `smart_cleanup`, `casual`, `professional`, `code`, `bullet_points`
+or `raw`.
+
+### Local data
+
+- **SQLite history** in the Wispr Flow schema — searchable, copyable, with
+  per-entry deletion and a one-click "clear everything" action.
+- **Personal vocabulary and snippets** — words are sent to the provider as
+  vocabulary hints, and trigger phrases can be expanded automatically
+  (`brb` → `be right back`).
+- **Single-instance guard** so a second launch cannot duplicate the keyboard
+  hook or the tray icon.
+
+### Desktop integration
+
+- **System tray** (Windows notification area / StatusNotifierItem on Linux) with
+  open, hide, start/stop dictation and quit actions.
+- **Auto-start** at login (Windows registry `Run` key / XDG autostart entry).
+- **Diagnostics** — rotating log files plus a panic hook, so a crash is
+  reproducible by the user instead of vanishing.
+- **In-app update checker** — queries the GitHub release feed, shows the new
+  version with release notes, and links to the right installer for your
+  platform.
 
 ---
 
-## 🚀 Building & Running
+## 📦 Installation
 
-### Prerequisites
-- Windows 10 / 11 (x64)
-- Rust toolchain (`rustup install stable`)
+### Windows
 
-### Build Release Binary
+Download `Wflow-Setup-<version>.exe` from the
+[releases page](https://github.com/redpotion39/wflow/releases) and run it.
+The installer registers `wflow.exe`, creates Start Menu and Desktop shortcuts
+and can enable auto-start.
+
+To build it yourself you need [Inno Setup 6](https://jrsoftware.org/isinfo.php):
+
 ```powershell
 cargo build --release
-```
-The compiled binary will be placed at:
-```
-target\release\wispr-flow-rust.exe
+iscc installer.iss
 ```
 
-### Run
-```powershell
-cargo run --release
-```
+### Linux
 
----
+**Debian / Ubuntu**
 
-## 🎙️ How to Use
-
-1. Click on any text box or application where you want to type (e.g. Notepad, Chrome, VS Code, Discord, Word).
-2. **Press and hold `F8`**: The console will show the real-time audio waveform:
-   ```
-   [🎙️  LISTENING] ██████████          (Release F8 to finish)
-   ```
-3. **Speak clearly into your microphone**: Audio packets are streamed in real time.
-4. **Release `F8`**: The audio stream commits, the transcript is received from the server, and the text is automatically pasted into the active text box!
-5. All dictations are recorded in the local SQLite database.
-
----
-
-## 📦 Installation & Packaging
-
-### Windows Installer (Inno Setup)
-- **Installer executable**: `dist/Wflow-Setup-0.1.0.exe`
-- Automatically installs `wflow.exe`, creates Start Menu shortcuts, Desktop icon, and optional startup integration.
-- To recompile:
-  ```powershell
-  iscc installer.iss
-  ```
-
-### Linux (Ubuntu / Debian & All Distributions)
-
-#### 1. Universal Self-Extracting Installer (`.run`):
-Runs on any Linux distribution (Ubuntu, Debian, Fedora, Arch, etc.):
 ```bash
-# User install (no sudo / root required):
-./dist/wflow-0.1.0-linux-x86_64.run --user
-
-# System-wide install:
-sudo ./dist/wflow-0.1.0-linux-x86_64.run --system
+sudo dpkg -i wflow_<version>_amd64.deb
+sudo apt-get install -f   # install missing runtime dependencies
 ```
 
-#### 2. Install via Debian Package (`.deb`):
+**Universal self-extracting installer** (any distribution)
+
 ```bash
-sudo dpkg -i dist/wflow_0.1.0_amd64.deb
-sudo apt-get install -f   # Fix any missing system dependencies
+./wflow-<version>-linux-x86_64.run --user     # no root required
+sudo ./wflow-<version>-linux-x86_64.run --system
 ```
 
-#### 3. Install via Universal Shell Script:
+**Install script**
+
 ```bash
-# User install:
 ./install.sh --user
-
-# System install:
 sudo ./install.sh --system
 ```
 
-#### 4. Build All Linux Packages from Source:
-```bash
-# Install Ubuntu build prerequisites
-sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libasound2-dev libssl-dev libx11-dev libxkbcommon-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev xdotool dpkg-dev
+**Build all packages from source**
 
-# Build all installers (.deb, .run, .tar.gz)
+```bash
+sudo apt-get install -y build-essential pkg-config libasound2-dev libssl-dev \
+    libx11-dev libxkbcommon-dev libxcursor-dev libxi-dev libxrandr-dev \
+    libgl1-mesa-dev xdotool dpkg-dev
+
 bash packaging/linux/build-all.sh
 ```
-All outputs are generated in the `dist/` directory:
-- `dist/wflow_0.1.0_amd64.deb`
-- `dist/wflow-0.1.0-linux-x86_64.run`
-- `dist/wflow-0.1.0-linux-x86_64.tar.gz`
 
-#### 5. Automated GitHub Actions CI/CD:
-Every push or release automatically triggers `.github/workflows/build-ubuntu.yml` to build all Linux installers (`.deb`, `.run`, `.tar.gz`) as downloadable artifacts.
+Outputs land in `dist/`: a `.deb`, a `.run` installer and a `.tar.gz` bundle.
 
+### Requirements
+
+* Windows 10/11 x64, or a 64-bit Linux distribution
+* A Rust toolchain (stable) if you want to build from source
+* On Linux: `xdotool` for pasting, and an audio player (`paplay`, `pw-play`,
+  `aplay` or `ffplay`) for the earcons
+
+---
+
+## ⌨️ Usage
+
+1. Focus any text box (Notepad, Chrome, VS Code, Word, Discord, …).
+2. Hold the dictation hotkey — `F8` by default, or whatever you configured.
+3. Speak. The HUD shows a live waveform while recording.
+4. Release. The transcript is transcribed, optionally cleaned up by the LLM, and
+   pasted into the focused field.
+5. The entry is written to the local history.
+
+Keyboard shortcuts:
+
+| Action | Default |
+|---|---|
+| Push-to-talk dictation | `F8` |
+| Show / hide the window | `F9` |
+| Check for updates | `wflow --check-updates` |
 
 ---
 
 ## ⚙️ Configuration
 
-A default `config.json` is automatically created on first run:
-```json
-{
-  "api_endpoint": "https://api.wisprflow.ai:443",
-  "auth_token": "Bearer YOUR_JWT_TOKEN",
-  "language": "en",
-  "hotkey": "F8",
-  "db_path": "flow.sqlite"
-}
+Configuration lives in a per-user directory:
+
+| Platform | Configuration | Data | Logs |
+|---|---|---|---|
+| Windows | `%APPDATA%\Wflow\` | `%APPDATA%\Wflow\` | `%APPDATA%\Wflow\logs\` |
+| Linux | `~/.config/wflow/` | `~/.local/share/wflow/` | `~/.local/state/wflow/logs/` |
+
+`config.json` holds non-secret preferences. **API keys and session tokens are
+never written there** — they live in `secrets.json`, created with `0600`
+permissions and replaced atomically. See [SECURITY.md](SECURITY.md).
+
+Secrets can also be provided per-process, which takes precedence:
+
+```bash
+export WFLOW_AUTH_TOKEN="..."
+export WFLOW_GROQ_API_KEY="gsk_..."
+export WFLOW_ELEVENLABS_API_KEY="xi-..."
+export WFLOW_BASETEN_API_KEY="Api-Key ..."
+export WFLOW_UPDATE_REPO="owner/repo"     # override the update feed
+export WFLOW_GITHUB_TOKEN="ghp_..."        # only needed for a private repo
 ```
-You can update `auth_token` with your Wispr Flow session token (found in `%APPDATA%\Wispr Flow\flow.sqlite` or local storage) to connect to live services.
+
+The update checker reads the public GitHub Releases feed. If the repository is
+private, export `WFLOW_GITHUB_TOKEN` with a token that has `read:packages`
+/ public-repository read access.
+
+The gRPC gateway key is **not** embedded in the binary. If you use the Wispr
+Flow provider, enter your key in **Settings → STT Provider**, or export
+`WFLOW_BASETEN_API_KEY`.
+
+---
+
+## 🔒 Privacy
+
+Wflow is designed so you control what leaves your machine:
+
+* **Context sharing is opt-out and visible.** Surrounding text is only sent to
+  the provider when *Settings → Privacy & Local Data → Share surrounding text
+  context* is enabled. Turn it off to dictate sensitive content.
+* **Local history retention is opt-in.** The contents of the focused text box
+  are *not* stored by default.
+* **Erase anytime** with *Settings → Privacy & Local Data → Clear history*, or
+  delete `flow.sqlite`.
+* **Logs contain no credentials and no transcripts** — only diagnostics.
+
+---
+
+## 🏗️ Project structure
+
+```
+wflow/
+├── proto/flow_api.proto     # Reconstructed Protobuf definition
+├── src/
+│   ├── main.rs              # CLI, logging, background coordinator
+│   ├── lib.rs               # Library root
+│   ├── audio.rs             # cpal capture, 16 kHz resampling, RMS meter
+│   ├── config.rs            # AppConfig + KeyCombo
+│   ├── db.rs                # SQLite history, dictionary, snippets
+│   ├── grpc.rs              # Tonic gRPC streaming client
+│   ├── gui.rs               # egui studio, history, dictionary, settings
+│   ├── http.rs              # Shared HTTP client + retry policy
+│   ├── instance.rs          # Single-instance lock
+│   ├── paths.rs             # Per-user directories
+│   ├── proto.rs             # prost messages for flow_api.v1
+│   ├── secrets.rs           # 0600 secrets file
+│   ├── sound.rs             # Synthesised earcons
+│   ├── stt.rs               # Groq / ElevenLabs HTTP clients + LLM cleanup
+│   ├── text.rs              # Shared text helpers
+│   ├── thai.rs              # Thai typography normalisation
+│   ├── ui.rs                # Dictation status definitions
+│   ├── update.rs            # GitHub release update checker
+│   └── platform/
+│       ├── mod.rs           # Cross-platform interface
+│       ├── windows.rs       # Win32 hook, UI Automation, SendInput, HUD
+│       └── linux.rs         # X11 hotkeys, ksni tray, paste, autostart
+├── packaging/linux/         # .deb / .run builders, desktop + AppStream data
+├── .github/workflows/       # CI, release and package builds
+├── LICENSE                  # MIT
+└── SECURITY.md
+```
+
+---
+
+## 🧪 Development
+
+```bash
+cargo build --release      # optimised binary
+cargo test                 # unit tests
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all
+```
+
+CI runs formatting, Clippy, the test suite, a build matrix (Linux / Windows /
+macOS), `cargo audit` and a repository secret-leak scan on every push.
+
+---
+
+## 📄 License
+
+MIT — see [LICENSE](LICENSE).
+
+Third-party services keep their own licenses and terms; Wflow is an
+independent client and ships no third-party credentials.

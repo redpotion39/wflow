@@ -1,0 +1,70 @@
+.TH WFLOW 1 "2026-10-21" "wflow 0.2.0" "User Commands"
+.SH NAME
+wflow \- high-performance native AI voice dictation
+.SH SYNOPSIS
+.B wflow
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B Wflow
+captures your microphone while a global push-to-talk hotkey is held, streams the
+audio to the configured speech-to-text provider and pastes the transcript into
+the focused text box. It lives in the system tray and can be toggled with a
+global hotkey.
+.PP
+Dictations are stored in a local SQLite database and can be searched, copied
+and re-inserted from the History tab.
+.SH OPTIONS
+.TP
+.B \-\-startup
+Start minimized in the system tray (used by the autostart entry).
+.TP
+.B \-\-check\-updates
+Query the release feed, print the newest version and exit.
+.TP
+.B \-V, \-\-version
+Print the version and exit.
+.TP
+.B \-h, \-\-help
+Print the usage summary and exit.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/wflow/config.json
+Non-secret preferences.
+.TP
+.I $XDG_CONFIG_HOME/wflow/secrets.json
+API keys and session tokens. Created with 0600 permissions.
+.TP
+.I $XDG_DATA_HOME/wflow/flow.sqlite
+Local dictation history, vocabulary and snippets.
+.TP
+.I $XDG_STATE_HOME/wflow/logs/
+Rotating diagnostic logs.
+.SH ENVIRONMENT
+.TP
+.B RUST_LOG
+Log filter, for example
+.BR info ", " debug " or " wflow=trace .
+.TP
+.B WFLOW_AUTH_TOKEN
+Overrides the stored Wispr Flow session token.
+.TP
+.B WFLOW_GROQ_API_KEY
+Overrides the stored Groq API key.
+.TP
+.B WFLOW_ELEVENLABS_API_KEY
+Overrides the stored ElevenLabs API key.
+.TP
+.B WFLOW_BASETEN_API_KEY
+Overrides the stored gRPC gateway key.
+.TP
+.B WFLOW_UPDATE_REPO
+GitHub repository used by the update checker.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+The update check failed.
+.SH SEE ALSO
+Project homepage: https://github.com/redpotion39/wflow

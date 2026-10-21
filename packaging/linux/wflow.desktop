@@ -10,5 +10,5 @@ Terminal=false
 Categories=Utility;AudioVideo;Audio;
 Keywords=voice;dictation;speech;stt;ai;transcribe;wispr;audio;
 StartupNotify=true
+StartupWMClass=wflow
 MimeType=x-scheme-handler/wflow;
-X-GNOME-Autostart-enabled=true

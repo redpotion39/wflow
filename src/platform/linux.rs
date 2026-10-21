@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 use tokio::sync::mpsc;
@@ -45,7 +45,11 @@ impl ksni::Tray for WflowTray {
             for pixel in data.chunks_exact_mut(4) {
                 pixel.rotate_right(1); // RGBA -> ARGB network byte order
             }
-            vec![ksni::Icon { width, height, data }]
+            vec![ksni::Icon {
+                width,
+                height,
+                data,
+            }]
         } else {
             Vec::new()
         }
@@ -59,6 +63,7 @@ impl ksni::Tray for WflowTray {
         use ksni::menu::*;
         let tx1 = self.tx.clone();
         let tx2 = self.tx.clone();
+        let tx3 = self.tx.clone();
         let is_rec = self.is_recording;
 
         vec![
@@ -97,8 +102,10 @@ impl ksni::Tray for WflowTray {
             StandardItem {
                 label: "🔴 ปิดโปรแกรม (Quit Wflow)".into(),
                 icon_name: "application-exit".into(),
-                activate: Box::new(|_| {
-                    std::process::exit(0);
+                activate: Box::new(move |_| {
+                    // Ask the coordinator to shut down gracefully so the
+                    // database is flushed and the log file is closed.
+                    let _ = tx3.send(HotkeyEvent::QuitApp);
                 }),
                 ..Default::default()
             }
@@ -157,6 +164,261 @@ pub fn vk_to_string(vk: u16) -> String {
 static RECORDING_MODE: Mutex<Option<u8>> = Mutex::new(None);
 static HOTKEY_VK: Mutex<u16> = Mutex::new(0x77); // F8
 static TOGGLE_VK: Mutex<u16> = Mutex::new(0x78); // F9
+static HOTKEY_COMBO: Mutex<KeyCombo> = Mutex::new(KeyCombo::single(0x77));
+static TOGGLE_COMBO: Mutex<KeyCombo> = Mutex::new(KeyCombo::single(0x78));
+
+#[cfg(target_os = "linux")]
+mod x11_keys {
+    use super::*;
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::ConnectionExt;
+
+    /// Polls the X11 keyboard state, which is the only portable way to get both
+    /// key-down and key-up events for push-to-talk on X11/XWayland.
+    pub struct Keyboard {
+        conn: x11rb::rust_connection::RustConnection,
+        keysyms: Vec<(u32, u8)>,
+        keycode_vk: Vec<(u8, u16)>,
+        pub ctrl: Vec<u8>,
+        pub alt: Vec<u8>,
+        pub shift: Vec<u8>,
+        pub win: Vec<u8>,
+    }
+
+    impl Keyboard {
+        pub fn connect() -> anyhow::Result<Self> {
+            let (conn, _screen) = x11rb::connect(None)?;
+            let setup = conn.setup();
+            let min = setup.min_keycode;
+            let count = setup.max_keycode.saturating_sub(min) + 1;
+            let reply = conn.get_keyboard_mapping(min, count)?.reply()?;
+            let per = if count == 0 {
+                0
+            } else {
+                reply.keysyms.len() / count as usize
+            };
+
+            let mut keysyms = Vec::new();
+            let mut keycode_vk = Vec::new();
+            for (index, chunk) in reply.keysyms.chunks(per.max(1)).enumerate() {
+                if let Some(&first) = chunk.first() {
+                    let keycode = min + index as u8;
+                    keysyms.push((first, keycode));
+                    if let Some(vk) = keysym_to_vk(first) {
+                        keycode_vk.push((keycode, vk));
+                    }
+                }
+            }
+
+            let code_for = |sym: u32| keysyms.iter().find(|(s, _)| *s == sym).map(|(_, c)| *c);
+            let ctrl = [0xFFE3u32, 0xFFE4]
+                .iter()
+                .filter_map(|s| code_for(*s))
+                .collect();
+            let alt = [0xFFE9u32, 0xFFEA]
+                .iter()
+                .filter_map(|s| code_for(*s))
+                .collect();
+            let shift = [0xFFE1u32, 0xFFE2]
+                .iter()
+                .filter_map(|s| code_for(*s))
+                .collect();
+            let win = [0xFFEBu32, 0xFFEC]
+                .iter()
+                .filter_map(|s| code_for(*s))
+                .collect();
+
+            Ok(Self {
+                conn,
+                keysyms,
+                keycode_vk,
+                ctrl,
+                alt,
+                shift,
+                win,
+            })
+        }
+
+        pub fn keymap(&self) -> Option<Vec<u8>> {
+            self.conn
+                .query_keymap()
+                .ok()?
+                .reply()
+                .ok()
+                .map(|r| r.keys.to_vec())
+        }
+
+        pub fn keycode_for_vk(&self, vk: u16) -> Option<u8> {
+            let sym = vk_to_keysym(vk)?;
+            self.keysyms
+                .iter()
+                .find(|(s, _)| *s == sym)
+                .map(|(_, code)| *code)
+        }
+
+        pub fn vk_for_keycode(&self, keycode: u8) -> Option<u16> {
+            self.keycode_vk
+                .iter()
+                .find(|(code, _)| *code == keycode)
+                .map(|(_, vk)| *vk)
+        }
+    }
+
+    fn keysym_to_vk(sym: u32) -> Option<u16> {
+        match sym {
+            0x08 => Some(0x08),                                    // BackSpace
+            0x09 => Some(0x09),                                    // Tab
+            0xFF0D => Some(0x0D),                                  // Return
+            0xFF1B => Some(0x1B),                                  // Escape
+            0x20 => Some(0x20),                                    // Space
+            0x30..=0x39 => Some(sym as u16),                       // 0-9
+            0x61..=0x7A => Some(sym as u16 - 0x20),                // a-z -> VK A-Z
+            0xFFBE..=0xFFC9 => Some(0x70 + (sym as u16 - 0xFFBE)), // F1-F12
+            0xFFE1 | 0xFFE2 => Some(0x10),
+            0xFFE3 | 0xFFE4 => Some(0x11),
+            0xFFE9 | 0xFFEA => Some(0x12),
+            0xFFEB | 0xFFEC => Some(0x5B),
+            _ => None,
+        }
+    }
+
+    fn vk_to_keysym(vk: u16) -> Option<u32> {
+        match vk {
+            0x08 => Some(0x08),
+            0x09 => Some(0x09),
+            0x0D => Some(0xFF0D),
+            0x1B => Some(0xFF1B),
+            0x20 => Some(0x20),
+            0x30..=0x39 => Some(vk as u32),
+            0x41..=0x5A => Some(vk as u32 + 0x20),
+            0x70..=0x7B => Some(0xFFBE + (vk as u32 - 0x70)),
+            0xA0..=0xA1 => Some(0xFFE1),
+            0xA2..=0xA3 => Some(0xFFE3),
+            0xA4..=0xA5 => Some(0xFFE9),
+            0x5B..=0x5C => Some(0xFFEB),
+            _ => None,
+        }
+    }
+
+    pub fn is_down(keys: &[u8], code: u8) -> bool {
+        keys.get(code as usize)
+            .map(|byte| byte & 1 != 0)
+            .unwrap_or(false)
+    }
+
+    pub fn any_down(keys: &[u8], codes: &[u8]) -> bool {
+        codes.iter().any(|code| is_down(keys, *code))
+    }
+
+    pub fn modifiers_match(keys: &[u8], kb: &Keyboard, combo: &KeyCombo) -> bool {
+        any_down(keys, &kb.ctrl) == combo.ctrl
+            && any_down(keys, &kb.alt) == combo.alt
+            && any_down(keys, &kb.shift) == combo.shift
+            && any_down(keys, &kb.win) == combo.win
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_hotkey_loop(tx: &mpsc::UnboundedSender<HotkeyEvent>) -> anyhow::Result<()> {
+    let keyboard = x11_keys::Keyboard::connect()?;
+    info!("Linux X11 global hotkey listener active");
+
+    let mut prev_hot = false;
+    let mut prev_toggle = false;
+    let mut prev_keys = keyboard.keymap().unwrap_or_default();
+    let mut prev_recording: Option<u8> = None;
+
+    loop {
+        if tx.is_closed() {
+            return Ok(());
+        }
+
+        let Some(keys) = keyboard.keymap() else {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            continue;
+        };
+
+        let recording = *RECORDING_MODE.lock().unwrap_or_else(|e| e.into_inner());
+
+        if recording.is_none() {
+            let hotkey = *HOTKEY_COMBO.lock().unwrap_or_else(|e| e.into_inner());
+            let toggle = *TOGGLE_COMBO.lock().unwrap_or_else(|e| e.into_inner());
+
+            let hot = keyboard
+                .keycode_for_vk(hotkey.key)
+                .map(|code| x11_keys::is_down(&keys, code))
+                .unwrap_or(false)
+                && x11_keys::modifiers_match(&keys, &keyboard, &hotkey);
+
+            if hot != prev_hot {
+                let event = if hot {
+                    HotkeyEvent::Pressed
+                } else {
+                    HotkeyEvent::Released
+                };
+                let _ = tx.send(event);
+                prev_hot = hot;
+            }
+
+            let toggle_down = keyboard
+                .keycode_for_vk(toggle.key)
+                .map(|code| x11_keys::is_down(&keys, code))
+                .unwrap_or(false)
+                && x11_keys::modifiers_match(&keys, &keyboard, &toggle);
+
+            if toggle_down && !prev_toggle {
+                let _ = tx.send(HotkeyEvent::ToggleWindow);
+            }
+            prev_toggle = toggle_down;
+        } else {
+            prev_hot = false;
+            prev_toggle = false;
+        }
+
+        // Hotkey recording mode: report the first newly pressed non-modifier key.
+        if let Some(mode) = recording {
+            let newly_pressed = keys
+                .iter()
+                .enumerate()
+                .find(|(index, byte)| {
+                    **byte & 1 != 0 && prev_keys.get(*index).map(|b| b & 1 == 0).unwrap_or(true)
+                })
+                .map(|(index, _)| index as u8)
+                .filter(|code| {
+                    keyboard
+                        .vk_for_keycode(*code)
+                        .map(|vk| !matches!(vk, 0x10..=0x12 | 0xA0..=0xA5 | 0x5B | 0x5C))
+                        .unwrap_or(false)
+                });
+
+            if let Some(code) = newly_pressed {
+                if let Some(vk) = keyboard.vk_for_keycode(code) {
+                    let combo = KeyCombo {
+                        ctrl: x11_keys::any_down(&keys, &keyboard.ctrl),
+                        alt: x11_keys::any_down(&keys, &keyboard.alt),
+                        shift: x11_keys::any_down(&keys, &keyboard.shift),
+                        win: x11_keys::any_down(&keys, &keyboard.win),
+                        key: vk,
+                    };
+                    let _ = tx.send(HotkeyEvent::KeyRecorded(mode, combo));
+                    if let Ok(mut lock) = RECORDING_MODE.lock() {
+                        *lock = None;
+                    }
+                }
+            }
+        }
+
+        if prev_recording.is_some() && recording.is_none() {
+            // Finished recording; start from a clean slate so the newly assigned
+            // hotkey does not fire immediately.
+            prev_hot = true;
+        }
+        prev_recording = recording;
+        prev_keys = keys;
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
 
 pub struct PlatformManager;
 
@@ -164,7 +426,7 @@ impl PlatformManager {
     pub fn get_active_app_context() -> ActiveAppContext {
         // Try reading window title on Linux via xdotool if available
         let title_output = std::process::Command::new("xdotool")
-            .args(&["getactivewindow", "getwindowname"])
+            .args(["getactivewindow", "getwindowname"])
             .output();
 
         let window_title = match title_output {
@@ -175,7 +437,7 @@ impl PlatformManager {
         };
 
         let pid_output = std::process::Command::new("xdotool")
-            .args(&["getactivewindow", "getwindowpid"])
+            .args(["getactivewindow", "getwindowpid"])
             .output();
 
         let process_name = match pid_output {
@@ -207,7 +469,7 @@ impl PlatformManager {
 
         // Simulate Ctrl+V on Linux via xdotool if installed
         let _ = std::process::Command::new("xdotool")
-            .args(&["key", "ctrl+v"])
+            .args(["key", "ctrl+v"])
             .status();
 
         Ok(())
@@ -218,6 +480,12 @@ impl PlatformManager {
         initial_hotkey: KeyCombo,
         initial_toggle: KeyCombo,
     ) -> Result<JoinHandle<()>> {
+        if let Ok(mut lock) = HOTKEY_COMBO.lock() {
+            *lock = initial_hotkey;
+        }
+        if let Ok(mut lock) = TOGGLE_COMBO.lock() {
+            *lock = initial_toggle;
+        }
         if let Ok(mut lock) = HOTKEY_VK.lock() {
             *lock = initial_hotkey.key;
         }
@@ -225,31 +493,38 @@ impl PlatformManager {
             *lock = initial_toggle.key;
         }
 
-        // Spawn Linux System Tray via ksni in background thread
+        // Spawn Linux System Tray via ksni in a background thread
         let tray_tx = tx.clone();
         let tray = WflowTray {
             is_recording: false,
             tx: tray_tx,
         };
 
-        std::thread::spawn(move || {
-            match async_io::block_on(tray.spawn()) {
-                Ok(handle) => {
-                    info!("Linux StatusNotifierItem System Tray started successfully!");
-                    if let Ok(mut lock) = TRAY_HANDLE.lock() {
-                        *lock = Some(handle);
-                    }
+        std::thread::spawn(move || match async_io::block_on(tray.spawn()) {
+            Ok(handle) => {
+                info!("Linux StatusNotifierItem System Tray started successfully!");
+                if let Ok(mut lock) = TRAY_HANDLE.lock() {
+                    *lock = Some(handle);
                 }
-                Err(err) => {
-                    warn!("Could not start Linux StatusNotifierItem System Tray: {:?}", err);
-                }
+            }
+            Err(err) => {
+                warn!(
+                    "Could not start Linux StatusNotifierItem System Tray: {:?}",
+                    err
+                );
             }
         });
 
-        info!("Starting Linux background hotkey listener thread...");
+        info!("Starting Linux X11 background hotkey listener thread...");
         let handle = std::thread::spawn(move || {
-            while !tx.is_closed() {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+            if let Err(err) = run_hotkey_loop(&tx) {
+                warn!(
+                    "Linux global hotkeys are unavailable ({}). Use the in-window dictation button or set DISPLAY for X11/XWayland.",
+                    err
+                );
+                while !tx.is_closed() {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
             }
         });
 
@@ -268,12 +543,12 @@ impl PlatformManager {
 
     #[allow(dead_code)]
     pub fn get_hotkey_combo() -> KeyCombo {
-        KeyCombo::single(*HOTKEY_VK.lock().unwrap())
+        *HOTKEY_COMBO.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[allow(dead_code)]
     pub fn get_toggle_window_combo() -> KeyCombo {
-        KeyCombo::single(*TOGGLE_VK.lock().unwrap())
+        *TOGGLE_COMBO.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn update_hotkeys(hotkey: KeyCombo, toggle: KeyCombo) {
@@ -283,6 +558,23 @@ impl PlatformManager {
         if let Ok(mut lock) = TOGGLE_VK.lock() {
             *lock = toggle.key;
         }
+        if let Ok(mut lock) = HOTKEY_COMBO.lock() {
+            *lock = hotkey;
+        }
+        if let Ok(mut lock) = TOGGLE_COMBO.lock() {
+            *lock = toggle;
+        }
+    }
+
+    /// Opens a URL in the user's default browser / file manager.
+    pub fn open_url(url: &str) -> Result<()> {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .with_context(|| format!("Failed to open {}", url))
     }
 
     pub fn start_recording_hotkey(mode: u8) {
@@ -320,13 +612,13 @@ impl PlatformManager {
 
     pub fn show_main_window() {
         let _ = std::process::Command::new("xdotool")
-            .args(&["search", "--name", "Wflow", "windowactivate"])
+            .args(["search", "--name", "Wflow", "windowactivate"])
             .status();
     }
 
     pub fn hide_main_window() {
         let _ = std::process::Command::new("xdotool")
-            .args(&["search", "--name", "Wflow", "windowminimize"])
+            .args(["search", "--name", "Wflow", "windowminimize"])
             .status();
     }
 
@@ -350,7 +642,9 @@ impl PlatformManager {
     /// Enables or disables autostart on Ubuntu/Linux boot via XDG Autostart (.config/autostart/wflow.desktop)
     pub fn set_autostart(enable: bool) -> Result<()> {
         let home = std::env::var("HOME")?;
-        let autostart_dir = std::path::PathBuf::from(home).join(".config").join("autostart");
+        let autostart_dir = std::path::PathBuf::from(home)
+            .join(".config")
+            .join("autostart");
         let desktop_file = autostart_dir.join("wflow.desktop");
 
         if enable {

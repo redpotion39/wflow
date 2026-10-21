@@ -1,23 +1,18 @@
 use anyhow::{Context, Result};
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tracing::info;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SttProvider {
+    #[default]
     WisprFlow,
     Groq,
     ElevenLabs,
 }
 
-impl Default for SttProvider {
-    fn default() -> Self {
-        Self::WisprFlow
-    }
-}
-
 impl SttProvider {
-    #[allow(dead_code)]
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::WisprFlow => "Wispr Flow (gRPC Native)",
@@ -35,7 +30,7 @@ impl SttProvider {
     }
 }
 
-/// Converts raw mono 16-bit PCM samples into a standard in-memory WAV byte stream
+/// Converts raw mono 16-bit PCM samples into a standard in-memory WAV byte stream.
 pub fn pcm_to_wav(pcm_samples: &[i16], sample_rate: u32) -> Result<Vec<u8>> {
     let spec = hound::WavSpec {
         channels: 1,
@@ -45,8 +40,8 @@ pub fn pcm_to_wav(pcm_samples: &[i16], sample_rate: u32) -> Result<Vec<u8>> {
     };
     let mut cursor = std::io::Cursor::new(Vec::new());
     {
-        let mut writer = hound::WavWriter::new(&mut cursor, spec)
-            .context("Failed to initialize WAV writer")?;
+        let mut writer =
+            hound::WavWriter::new(&mut cursor, spec).context("Failed to initialize WAV writer")?;
         for &sample in pcm_samples {
             writer.write_sample(sample)?;
         }
@@ -66,15 +61,25 @@ struct ElevenLabsTranscriptionResponse {
     text: String,
 }
 
-/// Transcribes audio using Groq Cloud Whisper API (ultra-low latency)
+fn audio_part(wav_bytes: &[u8]) -> Part {
+    Part::bytes(wav_bytes.to_vec())
+        .file_name("dictation.wav")
+        .mime_str("audio/wav")
+        .expect("static MIME type is always valid")
+}
+
+/// Transcribes audio using the Groq Cloud Whisper API (ultra-low latency).
 pub async fn transcribe_groq(
     api_key: &str,
     model: &str,
     language: &str,
     wav_bytes: Vec<u8>,
+    timeout_secs: u64,
 ) -> Result<String> {
     if api_key.trim().is_empty() {
-        return Err(anyhow::anyhow!("Groq API key is missing. Please set it in Settings."));
+        return Err(anyhow::anyhow!(
+            "Groq API key is missing. Please set it in Settings."
+        ));
     }
 
     info!(
@@ -84,30 +89,28 @@ pub async fn transcribe_groq(
         language
     );
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
+    let client = crate::http::client();
+    let key = api_key.trim().to_string();
+    let model = model.to_string();
+    let language = language.to_string();
 
-    let file_part = Part::bytes(wav_bytes)
-        .file_name("dictation.wav")
-        .mime_str("audio/wav")?;
+    let res = crate::http::send_with_retry("Groq transcription", 3, || {
+        let mut form = Form::new()
+            .part("file", audio_part(&wav_bytes))
+            .text("model", model.clone())
+            .text("response_format", "json");
 
-    let mut form = Form::new()
-        .part("file", file_part)
-        .text("model", model.to_string())
-        .text("response_format", "json");
+        if !language.is_empty() && language != "auto" {
+            form = form.text("language", language.clone());
+        }
 
-    if !language.is_empty() && language != "auto" {
-        form = form.text("language", language.to_string());
-    }
-
-    let res = client
-        .post("https://api.groq.com/openai/v1/audio/transcriptions")
-        .header("Authorization", format!("Bearer {}", api_key.trim()))
-        .multipart(form)
-        .send()
-        .await
-        .context("Failed to send request to Groq API")?;
+        client
+            .post("https://api.groq.com/openai/v1/audio/transcriptions")
+            .header("Authorization", format!("Bearer {}", key))
+            .timeout(Duration::from_secs(timeout_secs.clamp(5, 300)))
+            .multipart(form)
+    })
+    .await?;
 
     let status = res.status();
     let body_text = res.text().await.unwrap_or_default();
@@ -119,19 +122,25 @@ pub async fn transcribe_groq(
     let parsed: GroqTranscriptionResponse = serde_json::from_str(&body_text)
         .with_context(|| format!("Failed to parse Groq response: {body_text}"))?;
 
-    info!("Groq transcribed text: '{}'", parsed.text.trim());
+    info!(
+        "Groq transcribed {} characters",
+        parsed.text.trim().chars().count()
+    );
     Ok(parsed.text.trim().to_string())
 }
 
-/// Transcribes audio using ElevenLabs Speech-to-Text API (Scribe model)
+/// Transcribes audio using the ElevenLabs Speech-to-Text API (Scribe model).
 pub async fn transcribe_elevenlabs(
     api_key: &str,
     model_id: &str,
     language: &str,
     wav_bytes: Vec<u8>,
+    timeout_secs: u64,
 ) -> Result<String> {
     if api_key.trim().is_empty() {
-        return Err(anyhow::anyhow!("ElevenLabs API key is missing. Please set it in Settings."));
+        return Err(anyhow::anyhow!(
+            "ElevenLabs API key is missing. Please set it in Settings."
+        ));
     }
 
     info!(
@@ -141,41 +150,44 @@ pub async fn transcribe_elevenlabs(
         language
     );
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()?;
+    let client = crate::http::client();
+    let key = api_key.trim().to_string();
+    let model_id = model_id.to_string();
+    let language = language.to_string();
 
-    let file_part = Part::bytes(wav_bytes)
-        .file_name("dictation.wav")
-        .mime_str("audio/wav")?;
+    let res = crate::http::send_with_retry("ElevenLabs transcription", 3, || {
+        let mut form = Form::new()
+            .part("file", audio_part(&wav_bytes))
+            .text("model_id", model_id.clone());
 
-    let mut form = Form::new()
-        .part("file", file_part)
-        .text("model_id", model_id.to_string());
+        if !language.is_empty() && language != "auto" {
+            form = form.text("language_code", language.clone());
+        }
 
-    if !language.is_empty() && language != "auto" {
-        form = form.text("language_code", language.to_string());
-    }
-
-    let res = client
-        .post("https://api.elevenlabs.io/v1/speech-to-text")
-        .header("xi-api-key", api_key.trim())
-        .multipart(form)
-        .send()
-        .await
-        .context("Failed to send request to ElevenLabs API")?;
+        client
+            .post("https://api.elevenlabs.io/v1/speech-to-text")
+            .header("xi-api-key", key.clone())
+            .timeout(Duration::from_secs(timeout_secs.clamp(5, 300)))
+            .multipart(form)
+    })
+    .await?;
 
     let status = res.status();
     let body_text = res.text().await.unwrap_or_default();
 
     if !status.is_success() {
-        return Err(anyhow::anyhow!("ElevenLabs API error ({status}): {body_text}"));
+        return Err(anyhow::anyhow!(
+            "ElevenLabs API error ({status}): {body_text}"
+        ));
     }
 
     let parsed: ElevenLabsTranscriptionResponse = serde_json::from_str(&body_text)
         .with_context(|| format!("Failed to parse ElevenLabs response: {body_text}"))?;
 
-    info!("ElevenLabs transcribed text: '{}'", parsed.text.trim());
+    info!(
+        "ElevenLabs transcribed {} characters",
+        parsed.text.trim().chars().count()
+    );
     Ok(parsed.text.trim().to_string())
 }
 
@@ -210,11 +222,12 @@ struct ChatResponseMessage {
     content: String,
 }
 
-/// Polishes and formats raw transcribed text using Groq's high-speed Llama 3.1 8B LLM (~150ms)
+/// Polishes and formats raw transcribed text using Groq's Llama 3.1 8B (~150 ms).
 pub async fn post_process_with_llm(
     api_key: &str,
     raw_text: &str,
     style: &str,
+    timeout_secs: u64,
 ) -> Result<String> {
     if api_key.trim().is_empty() || raw_text.trim().is_empty() || style == "raw" {
         return Ok(raw_text.to_string());
@@ -248,13 +261,14 @@ pub async fn post_process_with_llm(
         _ => return Ok(raw_text.to_string()),
     };
 
-    info!("Running AI Smart Formatting with style '{}' on Groq Llama 3.1 8B...", style);
+    info!(
+        "Running AI Smart Formatting with style '{}' on Groq Llama 3.1 8B...",
+        style
+    );
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(6))
-        .build()?;
-
-    let req_body = ChatCompletionRequest {
+    let client = crate::http::client();
+    let key = api_key.trim().to_string();
+    let body = ChatCompletionRequest {
         model: "llama-3.1-8b-instant".to_string(),
         messages: vec![
             ChatMessage {
@@ -270,27 +284,32 @@ pub async fn post_process_with_llm(
         max_tokens: 1024,
     };
 
-    let res = client
-        .post("https://api.groq.com/openai/v1/chat/completions")
-        .header("Authorization", format!("Bearer {}", api_key.trim()))
-        .header("Content-Type", "application/json")
-        .json(&req_body)
-        .send()
-        .await
-        .context("Failed to connect to Groq Chat Completion API")?;
+    let res = crate::http::send_with_retry("Groq smart formatting", 3, || {
+        client
+            .post("https://api.groq.com/openai/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", key))
+            .timeout(Duration::from_secs(timeout_secs.clamp(3, 120)))
+            .json(&body)
+    })
+    .await?;
 
     if !res.status().is_success() {
         let err_text = res.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!("Groq LLM error: {err_text}"));
     }
 
-    let parsed: ChatCompletionResponse = res.json().await
+    let parsed: ChatCompletionResponse = res
+        .json()
+        .await
         .context("Failed to parse Groq Chat response")?;
 
     if let Some(first) = parsed.choices.first() {
         let clean = first.message.content.trim().to_string();
         if !clean.is_empty() {
-            info!("AI Smart Formatting completed: '{}'", clean);
+            info!(
+                "AI Smart Formatting completed ({} chars)",
+                clean.chars().count()
+            );
             return Ok(clean);
         }
     }
@@ -298,20 +317,22 @@ pub async fn post_process_with_llm(
     Ok(raw_text.to_string())
 }
 
-/// Tests connection and validity of the Groq API key
+/// Tests connection and validity of the Groq API key.
 pub async fn test_groq_api(api_key: &str) -> Result<String> {
     if api_key.trim().is_empty() {
-        return Err(anyhow::anyhow!("ยังไม่ได้ระบุ Groq API Key! กรุณากรอก API Key ก่อนทดสอบ"));
+        return Err(anyhow::anyhow!(
+            "ยังไม่ได้ระบุ Groq API Key! กรุณากรอก API Key ก่อนทดสอบ"
+        ));
     }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()?;
-    let res = client
-        .get("https://api.groq.com/openai/v1/models")
-        .header("Authorization", format!("Bearer {}", api_key.trim()))
-        .send()
-        .await
-        .context("ไม่สามารถเชื่อมต่อไปยัง api.groq.com ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต")?;
+    let client = crate::http::client();
+    let key = api_key.trim().to_string();
+    let res = crate::http::send_with_retry("Groq API test", 2, || {
+        client
+            .get("https://api.groq.com/openai/v1/models")
+            .header("Authorization", format!("Bearer {}", key))
+    })
+    .await
+    .context("ไม่สามารถเชื่อมต่อไปยัง api.groq.com ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต")?;
 
     let status = res.status();
     if status.is_success() {
@@ -320,55 +341,88 @@ pub async fn test_groq_api(api_key: &str) -> Result<String> {
         Err(anyhow::anyhow!("Groq API Key ไม่ถูกต้อง (401 Unauthorized)"))
     } else {
         let body = res.text().await.unwrap_or_default();
-        Err(anyhow::anyhow!("Groq API เกิดข้อผิดพลาด: HTTP {} - {}", status, body))
+        Err(anyhow::anyhow!(
+            "Groq API เกิดข้อผิดพลาด: HTTP {} - {}",
+            status,
+            body
+        ))
     }
 }
 
-/// Tests connection and validity of the ElevenLabs API key
+/// Tests connection and validity of the ElevenLabs API key.
 pub async fn test_elevenlabs_api(api_key: &str) -> Result<String> {
     if api_key.trim().is_empty() {
-        return Err(anyhow::anyhow!("ยังไม่ได้ระบุ ElevenLabs API Key! กรุณากรอก API Key ก่อนทดสอบ"));
+        return Err(anyhow::anyhow!(
+            "ยังไม่ได้ระบุ ElevenLabs API Key! กรุณากรอก API Key ก่อนทดสอบ"
+        ));
     }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()?;
-    let res = client
-        .get("https://api.elevenlabs.io/v1/user")
-        .header("xi-api-key", api_key.trim())
-        .send()
-        .await
-        .context("ไม่สามารถเชื่อมต่อไปยัง api.elevenlabs.io ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต")?;
+    let client = crate::http::client();
+    let key = api_key.trim().to_string();
+    let res = crate::http::send_with_retry("ElevenLabs API test", 2, || {
+        client
+            .get("https://api.elevenlabs.io/v1/user")
+            .header("xi-api-key", key.clone())
+    })
+    .await
+    .context("ไม่สามารถเชื่อมต่อไปยัง api.elevenlabs.io ได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต")?;
 
     let status = res.status();
     if status.is_success() {
         Ok("เชื่อมต่อ ElevenLabs API สำเร็จ! API Key ถูกต้อง และบริการพร้อมใช้งาน 🎙️".to_string())
-    } else if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        Err(anyhow::anyhow!("ElevenLabs API Key ไม่ถูกต้อง (401 Unauthorized / 403 Forbidden)"))
+    } else if status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+    {
+        Err(anyhow::anyhow!(
+            "ElevenLabs API Key ไม่ถูกต้อง (401 Unauthorized / 403 Forbidden)"
+        ))
     } else {
         let body = res.text().await.unwrap_or_default();
-        Err(anyhow::anyhow!("ElevenLabs API เกิดข้อผิดพลาด: HTTP {} - {}", status, body))
+        Err(anyhow::anyhow!(
+            "ElevenLabs API เกิดข้อผิดพลาด: HTTP {} - {}",
+            status,
+            body
+        ))
     }
 }
 
-/// Tests connection to the WisprFlow endpoint
+/// Tests connection to the configured gRPC endpoint.
 pub async fn test_wisprflow_endpoint(endpoint_url: &str) -> Result<String> {
     if endpoint_url.trim().is_empty() {
-        return Err(anyhow::anyhow!("ยังไม่ได้ระบุ WisprFlow Endpoint URL"));
+        return Err(anyhow::anyhow!("ยังไม่ได้ระบุ Endpoint URL"));
     }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(4))
-        .build()?;
-    let res = client.get(endpoint_url.trim()).send().await;
-    match res {
-        Ok(_) => Ok("เชื่อมต่อเซิร์ฟเวอร์ WisprFlow Endpoint สำเร็จ ⚡".to_string()),
-        Err(e) if e.is_connect() || e.is_timeout() => {
-            Err(anyhow::anyhow!("ไม่สามารถเชื่อมต่อ WisprFlow Endpoint ({}): {}", endpoint_url, e))
-        }
-        Err(_) => {
-            // gRPC endpoints reject raw HTTP GET, but server reachability is confirmed
-            Ok("เชื่อมต่อเซิร์ฟเวอร์ WisprFlow สำเร็จ (Endpoint Reachable) ⚡".to_string())
-        }
+    let client = crate::http::client();
+    let url = endpoint_url.trim().to_string();
+    match crate::http::send_with_retry("Endpoint test", 2, || client.get(&url)).await {
+        // gRPC endpoints reject a raw HTTP GET, but any HTTP response proves
+        // the host is reachable.
+        Ok(_) => Ok("เชื่อมต่อเซิร์ฟเวอร์ Endpoint สำเร็จ ⚡".to_string()),
+        Err(e) => Err(anyhow::anyhow!(
+            "ไม่สามารถเชื่อมต่อ Endpoint ({}): {:#}",
+            endpoint_url,
+            e
+        )),
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    #[test]
+    fn wav_header_is_valid() {
+        let samples = vec![0i16; 1600];
+        let wav = pcm_to_wav(&samples, 16_000).unwrap();
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(wav.len(), 44 + samples.len() * 2);
+        let data_len = u32::from_le_bytes(wav[40..44].try_into().unwrap());
+        assert_eq!(data_len as usize, samples.len() * 2);
+    }
+
+    #[test]
+    fn provider_badges_are_stable() {
+        assert_eq!(SttProvider::WisprFlow.short_badge(), "Wispr");
+        assert_eq!(SttProvider::Groq.short_badge(), "Groq");
+        assert_eq!(SttProvider::ElevenLabs.short_badge(), "11Labs");
+    }
+}
