@@ -42,7 +42,7 @@ impl ksni::Tray for WflowTray {
             let width = img.width() as i32;
             let height = img.height() as i32;
             let mut data = img.into_rgba8().into_vec();
-            for pixel in data.chunks_exact_mut(4) {
+            for pixel in data.chunks_mut(4) {
                 pixel.rotate_right(1); // RGBA -> ARGB network byte order
             }
             vec![ksni::Icon {

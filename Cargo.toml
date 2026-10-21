@@ -2,6 +2,7 @@
 name = "wflow"
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.88"
 authors = ["Wflow Team"]
 description = "High-performance native Rust AI voice dictation"
 
