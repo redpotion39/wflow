@@ -42,7 +42,7 @@ impl ksni::Tray for WflowTray {
             let width = img.width() as i32;
             let height = img.height() as i32;
             let mut data = img.into_rgba8().into_vec();
-            for pixel in data.chunks_exact_mut(4) {
+            for pixel in data.chunks_mut(4) {
                 pixel.rotate_right(1); // RGBA -> ARGB network byte order
             }
             vec![ksni::Icon {
@@ -133,32 +133,6 @@ pub enum HotkeyEvent {
     QuitApp,
     KeyRecorded(u8, KeyCombo),
     AutostartToggled(bool),
-}
-
-pub fn vk_to_string(vk: u16) -> String {
-    match vk {
-        0x70 => "F1".to_string(),
-        0x71 => "F2".to_string(),
-        0x72 => "F3".to_string(),
-        0x73 => "F4".to_string(),
-        0x74 => "F5".to_string(),
-        0x75 => "F6".to_string(),
-        0x76 => "F7".to_string(),
-        0x77 => "F8".to_string(),
-        0x78 => "F9".to_string(),
-        0x79 => "F10".to_string(),
-        0x7A => "F11".to_string(),
-        0x7B => "F12".to_string(),
-        0xA2 => "Left Control".to_string(),
-        0xA3 => "Right Control".to_string(),
-        0xA4 => "Left Alt".to_string(),
-        0xA5 => "Right Alt".to_string(),
-        0x14 => "Caps Lock".to_string(),
-        0x20 => "Space".to_string(),
-        0x30..=0x39 => format!("{}", (vk as u8) as char),
-        0x41..=0x5A => format!("{}", (vk as u8) as char),
-        other => format!("Key(0x{:02X})", other),
-    }
 }
 
 static RECORDING_MODE: Mutex<Option<u8>> = Mutex::new(None);
