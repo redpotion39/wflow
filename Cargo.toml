@@ -16,7 +16,7 @@ tokio-stream = "0.1"
 tonic = { version = "0.12", features = ["tls", "tls-roots", "channel"] }
 prost = "0.13"
 prost-types = "0.13"
-cpal = "0.15"
+cpal = "0.18"
 hound = "3.5"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
