@@ -1,5 +1,6 @@
 #define MyAppName "Wflow"
-#define MyAppVersion "0.3.5"
+; The version is replaced with the one from Cargo.toml before compiling.
+#define MyAppVersion "@VERSION@"
 #define MyAppPublisher "Wflow Team"
 #define MyAppExeName "wflow.exe"
 
