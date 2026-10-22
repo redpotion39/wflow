@@ -207,6 +207,10 @@ fn extract_binary(archive: &Path, dest_dir: &Path) -> Result<PathBuf> {
 }
 
 /// Marks a file as executable.
+///
+/// Only the self-replacing installation needs this; Windows runs the Inno
+/// Setup installer instead.
+#[cfg(not(target_os = "windows"))]
 fn make_executable(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -578,6 +582,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn extracts_the_binary_from_a_release_archive() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("release.tar.gz");
@@ -605,6 +610,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn replaces_a_binary_and_keeps_a_backup() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wflow");
@@ -620,6 +626,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn quotes_shell_arguments() {
         assert_eq!(shell_quote("/tmp/a b"), "'/tmp/a b'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
@@ -627,10 +634,12 @@ mod tests {
 
     /// Serves a fixed set of files over HTTP, so the download path can be
     /// tested without touching the network.
+    #[cfg(not(target_os = "windows"))]
     struct FileServer {
         address: String,
     }
 
+    #[cfg(not(target_os = "windows"))]
     impl FileServer {
         /// Serves the given bodies; the path has to contain the prefix.
         fn start_with(bodies: Vec<(String, Vec<u8>)>) -> Self {
@@ -673,6 +682,7 @@ mod tests {
     }
 
     /// A release archive that contains a script reporting the given version.
+    #[cfg(not(target_os = "windows"))]
     fn build_release_archive(path: &Path, version: &str) {
         let payload = format!("#!/bin/sh\necho \"wflow {version}\"\n");
         let file = std::fs::File::create(path).unwrap();
