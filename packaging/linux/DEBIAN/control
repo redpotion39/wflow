@@ -1,5 +1,5 @@
 Package: wflow
-Version: 0.2.0
+Version: @VERSION@
 Section: utils
 Priority: optional
 Architecture: amd64

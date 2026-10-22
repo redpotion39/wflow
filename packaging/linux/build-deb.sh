@@ -73,9 +73,13 @@ chmod 644 "$STAGING_DIR/usr/share/doc/wflow/copyright"
 
 # 4. Copy DEBIAN control and maintainer scripts
 echo ">> Setting up Debian control scripts..."
-cp packaging/linux/DEBIAN/control "$STAGING_DIR/DEBIAN/control"
-chmod 644 "$STAGING_DIR/DEBIAN/control"
+VERSION="$(grep -m1 '^version' "$ROOT_DIR/Cargo.toml" | cut -d'"' -f2)"
 
+# The control file carries a placeholder so that the package version always
+# matches the one in Cargo.toml.
+sed "s/@VERSION@/$VERSION/" packaging/linux/DEBIAN/control \
+    > "$STAGING_DIR/DEBIAN/control"
+chmod 644 "$STAGING_DIR/DEBIAN/control"
 cp packaging/linux/DEBIAN/postinst "$STAGING_DIR/DEBIAN/postinst"
 chmod 755 "$STAGING_DIR/DEBIAN/postinst"
 
@@ -84,7 +88,6 @@ chmod 755 "$STAGING_DIR/DEBIAN/postrm"
 
 # 5. Build .deb package using dpkg-deb
 mkdir -p dist
-VERSION="$(grep -m1 '^version' "$ROOT_DIR/Cargo.toml" | cut -d'"' -f2)"
 OUTPUT_DEB="dist/wflow_${VERSION}_amd64.deb"
 
 echo ">> Packing Debian archive..."
