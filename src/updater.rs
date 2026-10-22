@@ -196,6 +196,9 @@ fn extract_binary(archive: &Path, dest_dir: &Path) -> Result<PathBuf> {
         let mut out = std::fs::File::create(&target)
             .with_context(|| format!("Could not create {}", target.display()))?;
         std::io::copy(&mut entry, &mut out).context("Could not extract the application binary")?;
+        // Flush to disk and close the file before it is executed: an open
+        // write handle makes the kernel refuse to run it.
+        out.sync_all().ok();
         drop(out);
         make_executable(&target)?;
         return Ok(target);
@@ -220,16 +223,42 @@ fn make_executable(path: &Path) -> Result<()> {
 }
 
 /// Asks a binary for its version, e.g. `wflow 0.3.6`.
+///
+/// Executing a file that was written a moment ago can fail with `ETXTBSY`
+/// ("Text file busy"): while another thread forks, the child inherits the open
+/// write handle of the file, and the kernel then refuses to run it. The
+/// handle is gone as soon as the child execs, so a short retry is enough.
 #[cfg(not(target_os = "windows"))]
 fn binary_version(path: &Path) -> Result<String> {
-    let output = std::process::Command::new(path)
-        .arg("--version")
-        .output()
-        .with_context(|| format!("Could not run {}", path.display()))?;
-    if !output.status.success() {
-        bail!("The downloaded binary does not run");
+    const ATTEMPTS: usize = 10;
+
+    let mut last_error = None;
+    for attempt in 0..ATTEMPTS {
+        match std::process::Command::new(path).arg("--version").output() {
+            Ok(output) => {
+                if !output.status.success() {
+                    bail!("The downloaded binary does not run");
+                }
+                return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+            }
+            Err(err) if err.raw_os_error() == Some(26) => {
+                // `ETXTBSY`: the file is still held open by a forked child.
+                last_error = Some(err);
+                std::thread::sleep(Duration::from_millis(20 * (attempt as u64 + 1)));
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("Could not run {}", path.display()));
+            }
+        }
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+
+    Err(anyhow!(
+        "Could not run {}: {}",
+        path.display(),
+        last_error
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "Text file busy".to_string())
+    ))
 }
 
 /// Replaces `target` with `source`, keeping a backup of the old file.
@@ -705,6 +734,30 @@ mod tests {
         let guard = state.lock().unwrap();
         assert_eq!(guard.stage, InstallStage::Done);
         assert_eq!(guard.percent, 100);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn a_freshly_written_binary_can_be_executed() {
+        // Executing a file that was just written can fail with ETXTBSY while
+        // another thread forks. The version check has to survive that.
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    for _ in 0..25 {
+                        let dir = tempfile::tempdir().unwrap();
+                        let archive = dir.path().join("release.tar.gz");
+                        build_release_archive(&archive, "9.9.9");
+                        let extracted = extract_binary(&archive, dir.path()).unwrap();
+                        let version = binary_version(&extracted).unwrap();
+                        assert!(version.contains("9.9.9"), "version: {version}");
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
     }
 
     #[tokio::test]
