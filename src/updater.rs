@@ -316,6 +316,68 @@ fn replace_executable_privileged(target: &Path, source: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The `wflow` a user install would leave in `~/.local/bin`.
+///
+/// Such a copy shadows `/usr/bin/wflow` in `PATH`, so an update has to refresh
+/// it as well. `None` is returned when there is no home directory, when the
+/// copy does not exist, or when the running binary already *is* that copy.
+#[cfg(not(target_os = "windows"))]
+fn user_local_copy(home: Option<&Path>, running: &Path) -> Option<PathBuf> {
+    let local = home?.join(".local/bin/wflow");
+
+    // Nothing to do when the copy is missing or is not a regular file.
+    let metadata = std::fs::symlink_metadata(&local).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let same = match (
+        std::fs::canonicalize(&local),
+        std::fs::canonicalize(running),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if same {
+        return None;
+    }
+    Some(local)
+}
+
+/// The home directory of the user running the app.
+#[cfg(not(target_os = "windows"))]
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Copies the freshly installed binary over a second location.
+///
+/// The copy is written next to the target and moved into place, so the
+/// replacement is atomic and works even when the existing file is owned by
+/// root but its directory is writable by the user.
+#[cfg(not(target_os = "windows"))]
+fn sync_copy(installed: &Path, destination: &Path) -> Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent directory", destination.display()))?;
+
+    let file_name = destination
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "wflow".to_string());
+    let staged = parent.join(format!(".{file_name}.{}.new", std::process::id()));
+
+    std::fs::copy(installed, &staged)
+        .with_context(|| format!("Could not write {}", staged.display()))?;
+    make_executable(&staged)?;
+
+    if let Err(err) = std::fs::rename(&staged, destination) {
+        // Do not leave the staged copy behind if the move is refused.
+        let _ = std::fs::remove_file(&staged);
+        return Err(err).with_context(|| format!("Could not replace {}", destination.display()));
+    }
+    Ok(())
+}
+
 /// Schedules a restart of the application.
 ///
 /// A small shell helper waits until the current process is gone and then
@@ -476,13 +538,15 @@ async fn install_self_replacing(
 ) -> Result<()> {
     let executable = std::env::current_exe().context("Could not locate the running binary")?;
     let staging = staging_dir();
-    install_into(info, state, restart, &executable, &staging).await
+    let home = home_dir();
+    install_into(info, state, restart, &executable, &staging, home.as_deref()).await
 }
 
 /// The actual installation: download, verify, unpack and replace `target`.
 ///
-/// `staging` is the directory the downloads are kept in; it is a parameter so
-/// that the tests can work on their own copy.
+/// `staging` is the directory the downloads are kept in and `home` is the
+/// user's home directory. Both are parameters so that the tests work on their
+/// own copies and can never touch the real installation.
 #[cfg(not(target_os = "windows"))]
 async fn install_into(
     info: &UpdateInfo,
@@ -490,6 +554,7 @@ async fn install_into(
     restart: bool,
     target: &Path,
     staging: &Path,
+    home: Option<&Path>,
 ) -> Result<()> {
     let asset_url = install_asset(info)
         .ok_or_else(|| anyhow!("This release has no archive for this platform"))?;
@@ -538,6 +603,16 @@ async fn install_into(
     let installed = binary_version(target)?;
     if !installed.contains(&info.latest.to_string()) {
         bail!("The new version was not installed correctly");
+    }
+
+    // A copy in `~/.local/bin` takes precedence over `/usr/bin` in `PATH`, so
+    // a stale one would keep the user on the old version for ever. This is
+    // best effort: a failure here must not fail the update itself.
+    if let Some(local) = user_local_copy(home, target) {
+        match sync_copy(target, &local) {
+            Ok(()) => tracing::info!("Refreshed the user-local copy at {}", local.display()),
+            Err(err) => tracing::warn!("Could not refresh {}: {err:#}", local.display()),
+        }
     }
 
     // --- restart --------------------------------------------------------
@@ -630,6 +705,83 @@ mod tests {
     fn quotes_shell_arguments() {
         assert_eq!(shell_quote("/tmp/a b"), "'/tmp/a b'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    /// A stale copy in `~/.local/bin` is found and refreshed, so that it can
+    /// no longer shadow the packaged binary in `PATH`.
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn refreshes_a_user_local_copy() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("installed");
+        let local = home.path().join(".local/bin/wflow");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+
+        std::fs::write(&installed, b"new build").unwrap();
+        std::fs::write(&local, b"old build").unwrap();
+        make_executable(&installed).unwrap();
+
+        // A stale copy is detected...
+        let found = user_local_copy(Some(home.path()), &installed);
+        assert_eq!(found.as_deref(), Some(local.as_path()));
+
+        // ...and then refreshed in place.
+        sync_copy(&installed, &local).unwrap();
+        assert_eq!(std::fs::read(&local).unwrap(), b"new build");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&local).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111, "the copy must stay executable");
+        }
+
+        // No staged file is left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(local.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".new"))
+            .collect();
+        assert!(leftovers.is_empty(), "staged file left behind");
+    }
+
+    /// Nothing to do when there is no user-local copy at all.
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn ignores_a_missing_user_local_copy() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let running = dir.path().join("wflow");
+        std::fs::write(&running, b"build").unwrap();
+
+        assert!(user_local_copy(Some(home.path()), &running).is_none());
+    }
+
+    /// A copy that *is* the running binary is not touched again.
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn skips_a_copy_that_is_the_running_binary() {
+        let home = tempfile::tempdir().unwrap();
+        let local = home.path().join(".local/bin/wflow");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, b"build").unwrap();
+
+        assert!(
+            user_local_copy(Some(home.path()), &local).is_none(),
+            "the running binary is not a shadowing copy"
+        );
+    }
+
+    /// Without a home directory nothing is synced.
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn sync_needs_a_home_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = dir.path().join("wflow");
+        std::fs::write(&running, b"build").unwrap();
+
+        assert!(user_local_copy(None, &running).is_none());
     }
 
     /// Serves a fixed set of files over HTTP, so the download path can be
@@ -733,13 +885,28 @@ mod tests {
         };
 
         let state: SharedInstallState = Arc::new(Mutex::new(InstallState::default()));
-        install_into(&info, &state, false, &target, dir.path())
+        // A sandboxed home keeps the test away from the real installation.
+        let home = tempfile::tempdir().unwrap();
+        // A stale user-local copy that would shadow the new binary in PATH.
+        let local = home.path().join(".local/bin/wflow");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, "#!/bin/sh\necho \"wflow 1.0.0\"\n").unwrap();
+        make_executable(&local).unwrap();
+
+        install_into(&info, &state, false, &target, dir.path(), Some(home.path()))
             .await
             .unwrap();
 
         // The new binary is in place and reports the new version.
         let installed = binary_version(&target).unwrap();
         assert!(installed.contains("9.9.9"), "installed: {installed}");
+        // The user-local copy was refreshed as well, so it can no longer
+        // shadow the package in PATH.
+        let local_version = binary_version(&local).unwrap();
+        assert!(
+            local_version.contains("9.9.9"),
+            "the user-local copy was not refreshed: {local_version}"
+        );
         // The progress ended in the "done" state.
         let guard = state.lock().unwrap();
         assert_eq!(guard.stage, InstallStage::Done);
@@ -805,7 +972,8 @@ mod tests {
         };
 
         let state: SharedInstallState = Arc::new(Mutex::new(InstallState::default()));
-        let error = install_into(&info, &state, false, &target, dir.path())
+        let home = tempfile::tempdir().unwrap();
+        let error = install_into(&info, &state, false, &target, dir.path(), Some(home.path()))
             .await
             .expect_err("a corrupted archive must be rejected");
         assert!(
