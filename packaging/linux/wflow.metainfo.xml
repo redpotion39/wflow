@@ -51,6 +51,15 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.7" date="2026-10-22">
+      <description>
+        <p>Updates now refresh every copy of the app:</p>
+        <ul>
+          <li>A copy in ~/.local/bin, which shadows /usr/bin in PATH, is refreshed during an update</li>
+          <li>The refresh is atomic and never fails the update itself</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.6" date="2026-10-22">
       <description>
         <p>Auto-update, a Thai interface and a hotkey that always works:</p>
