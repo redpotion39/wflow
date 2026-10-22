@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::config::{AppConfig, KeyCombo};
 use crate::db::{DictionaryEntry, HistoryRecord};
+use crate::i18n::{tr, Lang};
 use crate::platform::{ActiveAppContext, PlatformManager};
 use crate::stt::SttProvider;
 use crate::thai::shape_thai;
@@ -25,6 +26,7 @@ pub enum ActiveTab {
 /// The sections of the settings page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsSection {
+    Language,
     Shortcuts,
     Audio,
     Ai,
@@ -49,14 +51,59 @@ pub enum GuiEvent {
     RefreshDictionary,
     CheckUpdate,
     SkipUpdateVersion(String),
+    /// Download, verify and install the pending update, then restart.
+    InstallUpdate,
     OpenUrl(String),
     OpenLogFolder,
+    /// Persist a new interface language immediately.
+    SetUiLanguage(String),
 }
 
 /// Locks a mutex, recovering from poisoning instead of panicking the GUI.
 ///
 /// A panic in any worker thread would otherwise poison the shared state and
 /// take the whole interface down.
+/// Font for headings, page titles and emphasised numbers.
+///
+/// egui's `.strong()` only tints text; it does not make it heavier. A real
+/// semibold face is registered as the "Heading" family so the interface has a
+/// visible hierarchy between titles and body copy.
+fn heading(size: f32) -> FontId {
+    FontId::new(size, egui::FontFamily::Name("Heading".into()))
+}
+
+/// Fills the single `{}` of a translated template.
+///
+/// `format!` only accepts string literals, so translated templates are
+/// substituted at runtime instead.
+fn tr1(lang: Lang, en: &'static str, value: impl std::fmt::Display) -> String {
+    tr(lang, en).replacen("{}", &value.to_string(), 1)
+}
+
+/// Fills two `{}` placeholders in a translated template, left to right.
+fn tr2(
+    lang: Lang,
+    en: &'static str,
+    first: impl std::fmt::Display,
+    second: impl std::fmt::Display,
+) -> String {
+    tr(lang, en)
+        .replacen("{}", &first.to_string(), 1)
+        .replacen("{}", &second.to_string(), 1)
+}
+
+/// Turns the RFC 3339 timestamp stored in the database into the compact
+/// `22/10/2026 15:58` form shown in the history list.
+fn friendly_timestamp(raw: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(raw) {
+        Ok(ts) => ts
+            .with_timezone(&chrono::Local)
+            .format("%d/%m/%Y %H:%M")
+            .to_string(),
+        Err(_) => raw.to_string(),
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|err| err.into_inner())
 }
@@ -83,6 +130,15 @@ pub struct AppState {
     pub update_info: Arc<Mutex<Option<UpdateInfo>>>,
     pub update_error: Arc<Mutex<Option<String>>>,
     pub update_check_running: Arc<AtomicBool>,
+    /// The release version the user chose to skip.
+    ///
+    /// This lives outside of `config` on purpose: `pending_update()` is called
+    /// from the sidebar while the config mutex is already held, and a
+    /// `std::sync::Mutex` is not reentrant, so reading the skipped version
+    /// from the config there would deadlock the whole interface.
+    pub skipped_update_version: Arc<Mutex<Option<String>>>,
+    /// Progress of the running self-update (download → verify → install).
+    pub update_install: crate::updater::SharedInstallState,
     /// The active noise gate, so the studio can show the voice activity.
     pub voice_gate: Arc<Mutex<Option<Arc<Mutex<crate::vad::VoiceGate>>>>>,
 }
@@ -93,6 +149,7 @@ impl AppState {
         initial_history: Vec<HistoryRecord>,
         initial_dict: Vec<DictionaryEntry>,
     ) -> Self {
+        let skipped_update_version = config.skipped_update_version.clone();
         Self {
             is_recording: Arc::new(AtomicBool::new(false)),
             current_amplitude: Arc::new(Mutex::new(0.0)),
@@ -112,6 +169,8 @@ impl AppState {
             update_info: Arc::new(Mutex::new(None)),
             update_error: Arc::new(Mutex::new(None)),
             update_check_running: Arc::new(AtomicBool::new(false)),
+            skipped_update_version: Arc::new(Mutex::new(skipped_update_version)),
+            update_install: Arc::new(Mutex::new(crate::updater::InstallState::default())),
             voice_gate: Arc::new(Mutex::new(None)),
         }
     }
@@ -129,6 +188,9 @@ pub struct WisprFlowGui {
     active_tab: ActiveTab,
     search_query: String,
     // Settings editable fields
+    settings_ui_language: String,
+    /// Interface language resolved from `settings_ui_language`.
+    ui_lang: Lang,
     settings_endpoint: String,
     settings_token: String,
     settings_language: String,
@@ -254,6 +316,7 @@ impl WisprFlowGui {
         runtime: tokio::runtime::Handle,
     ) -> Self {
         let (
+            ui_language,
             endpoint,
             token,
             language,
@@ -293,6 +356,7 @@ impl WisprFlowGui {
         ) = {
             let cfg = lock(&state.config);
             (
+                cfg.ui_language.clone(),
                 cfg.endpoint_url.clone(),
                 cfg.auth_token.clone().unwrap_or_default(),
                 cfg.language_code.clone(),
@@ -338,6 +402,8 @@ impl WisprFlowGui {
             runtime,
             active_tab: ActiveTab::Studio,
             search_query: String::new(),
+            settings_ui_language: ui_language.clone(),
+            ui_lang: Lang::from_code(&ui_language),
             settings_endpoint: endpoint,
             settings_token: token,
             settings_language: language,
@@ -399,7 +465,8 @@ impl WisprFlowGui {
         let mut loaded_primary = false;
         let mut loaded_thai = false;
         let mut loaded_cjk = false;
-        let mut loaded_emoji = false;
+        let loaded_emoji = true;
+        let mut loaded_bold = false;
 
         // 1. Primary UI Latin font (Segoe UI on Windows, Ubuntu/Liberation/DejaVu on Linux)
         #[cfg(target_os = "windows")]
@@ -419,21 +486,46 @@ impl WisprFlowGui {
                 }
             }
         }
+        // Resolves a fontconfig family to a real file. Asking for a named
+        // family (instead of the generic `sans-serif`) matters: on some
+        // desktops the generic alias points at a display or monospace face,
+        // which makes the whole UI look wrong.
+        #[cfg(not(target_os = "windows"))]
+        let fc_match = |family: &str| -> Option<std::path::PathBuf> {
+            let out = std::process::Command::new("fc-match")
+                .args(["-f", "%{file}", family])
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if path.is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(path))
+            }
+        };
+
         #[cfg(not(target_os = "windows"))]
         {
             let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-            if let Ok(out) = std::process::Command::new("fc-match")
-                .args(["-f", "%{file}", "sans-serif"])
-                .output()
-            {
-                if out.status.success() {
-                    let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    if !path_str.is_empty() {
-                        candidates.push(std::path::PathBuf::from(path_str));
-                    }
+            for family in [
+                "Inter",
+                "Noto Sans",
+                "Ubuntu",
+                "Cantarell",
+                "Liberation Sans",
+                "DejaVu Sans",
+            ] {
+                if let Some(path) = fc_match(family) {
+                    candidates.push(path);
                 }
             }
             candidates.extend(vec![
+                std::path::PathBuf::from(
+                    "/usr/share/fonts/truetype/inter-zorin-os/Inter-Regular.ttf",
+                ),
                 std::path::PathBuf::from("/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf"),
                 std::path::PathBuf::from(
                     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -448,6 +540,7 @@ impl WisprFlowGui {
                             .font_data
                             .insert("primary_ui".to_owned(), egui::FontData::from_owned(bytes));
                         loaded_primary = true;
+                        tracing::info!("Loaded primary UI font from {:?}", path);
                         break;
                     }
                 }
@@ -520,9 +613,17 @@ impl WisprFlowGui {
             for path in candidates {
                 if path.exists() {
                     if let Ok(bytes) = std::fs::read(&path) {
-                        fonts
-                            .font_data
-                            .insert("thai_font".to_owned(), egui::FontData::from_owned(bytes));
+                        // Garuda has a deeper ascent than Inter, which made
+                        // Thai text sit visually lower than the Latin text on
+                        // the same line. A small scale + upward shift lines
+                        // the two scripts up.
+                        let thai = egui::FontData::from_owned(bytes).tweak(egui::FontTweak {
+                            scale: 0.96,
+                            y_offset_factor: -0.08,
+                            y_offset: 0.0,
+                            baseline_offset_factor: 0.0,
+                        });
+                        fonts.font_data.insert("thai_font".to_owned(), thai);
                         loaded_thai = true;
                         tracing::info!("Loaded Linux Thai font from {:?}", path);
                         break;
@@ -593,35 +694,56 @@ impl WisprFlowGui {
             }
         }
 
-        // 4. Emoji font
+        // 4. Emoji / pictogram font.
+        //
+        // The UI uses emoji as small icons. Colour emoji fonts (Noto Color
+        // Emoji, Segoe UI Emoji) store bitmap glyphs that egui cannot render
+        // as outlines, which is exactly what produced the empty tofu boxes.
+        // A monochrome outline font is bundled instead so every glyph is
+        // available on every platform.
+        fonts.font_data.insert(
+            "emoji_font".to_owned(),
+            egui::FontData::from_static(include_bytes!("../assets/NotoEmoji-Regular.ttf")),
+        );
+        // 5. A real semibold face for headings. egui's `.strong()` only tints
+        // text, so a heavier cut is loaded to give the UI a clear hierarchy.
         #[cfg(target_os = "windows")]
         {
             let win_dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
-            let emoji_path = std::path::Path::new(&win_dir)
-                .join("Fonts")
-                .join("seguiemj.ttf");
-            if emoji_path.exists() {
-                if let Ok(bytes) = std::fs::read(&emoji_path) {
-                    fonts
-                        .font_data
-                        .insert("emoji_font".to_owned(), egui::FontData::from_owned(bytes));
-                    loaded_emoji = true;
+            let font_dir = std::path::Path::new(&win_dir).join("Fonts");
+            let bold_candidates = [font_dir.join("segoeuib.ttf"), font_dir.join("seguisb.ttf")];
+            for path in &bold_candidates {
+                if path.exists() {
+                    if let Ok(bytes) = std::fs::read(path) {
+                        fonts
+                            .font_data
+                            .insert("bold_ui".to_owned(), egui::FontData::from_owned(bytes));
+                        loaded_bold = true;
+                        break;
+                    }
                 }
             }
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let emoji_candidates = [
-                std::path::PathBuf::from("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
-                std::path::PathBuf::from("/usr/share/fonts/truetype/ancient-scripts/Symbola.ttf"),
-            ];
-            for path in emoji_candidates {
+            let mut bold_candidates: Vec<std::path::PathBuf> = Vec::new();
+            if let Some(path) = fc_match("Inter:style=SemiBold") {
+                bold_candidates.push(path);
+            }
+            bold_candidates.extend(vec![
+                std::path::PathBuf::from(
+                    "/usr/share/fonts/truetype/inter-zorin-os/Inter-SemiBold.ttf",
+                ),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf"),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            ]);
+            for path in bold_candidates {
                 if path.exists() {
                     if let Ok(bytes) = std::fs::read(&path) {
                         fonts
                             .font_data
-                            .insert("emoji_font".to_owned(), egui::FontData::from_owned(bytes));
-                        loaded_emoji = true;
+                            .insert("bold_ui".to_owned(), egui::FontData::from_owned(bytes));
+                        loaded_bold = true;
                         break;
                     }
                 }
@@ -644,6 +766,22 @@ impl WisprFlowGui {
             }
         }
 
+        // Heading family: the same fallback chain, but with the semibold face
+        // first so headings actually look heavier than body text.
+        {
+            let mut heading: Vec<String> = fonts
+                .families
+                .get(&egui::FontFamily::Proportional)
+                .cloned()
+                .unwrap_or_default();
+            if loaded_bold {
+                heading.insert(0, "bold_ui".to_owned());
+            }
+            fonts
+                .families
+                .insert(egui::FontFamily::Name("Heading".into()), heading);
+        }
+
         if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
             if loaded_thai {
                 family.push("thai_font".to_owned());
@@ -659,11 +797,12 @@ impl WisprFlowGui {
         if loaded_primary || loaded_thai || loaded_cjk {
             ctx.set_fonts(fonts);
             tracing::info!(
-                "Successfully applied typography: primary={}, thai={}, cjk={}, emoji={}",
+                "Successfully applied typography: primary={}, thai={}, cjk={}, emoji={}, bold={}",
                 loaded_primary,
                 loaded_thai,
                 loaded_cjk,
-                loaded_emoji
+                loaded_emoji,
+                loaded_bold
             );
         }
     }
@@ -713,6 +852,11 @@ impl eframe::App for WisprFlowGui {
         if !self.fonts_initialized {
             Self::configure_thai_fonts(ctx);
             self.fonts_initialized = true;
+            // Font definitions are swapped in at the start of the next pass.
+            // Drawing this frame would still use the default families and
+            // panic on the custom "Heading" family, so skip one frame.
+            ctx.request_repaint();
+            return;
         }
 
         if self.logo_texture.is_none() {
@@ -753,17 +897,24 @@ impl eframe::App for WisprFlowGui {
             if let Some((mode, combo)) = lock.take() {
                 self.recording_mode = None;
                 if combo.is_empty() {
-                    self.state.set_toast("Key recording cancelled");
+                    self.state
+                        .set_toast(tr(self.ui_lang, "Key recording cancelled"));
                 } else {
                     let key_name = combo.format_display();
                     if mode == 1 {
                         self.settings_hotkey = combo;
-                        self.state
-                            .set_toast(&format!("Dictation hotkey changed to: {}", key_name));
+                        self.state.set_toast(&tr1(
+                            self.ui_lang,
+                            "Dictation hotkey changed to: {}",
+                            key_name,
+                        ));
                     } else if mode == 2 {
                         self.settings_toggle = combo;
-                        self.state
-                            .set_toast(&format!("Window Toggle hotkey changed to: {}", key_name));
+                        self.state.set_toast(&tr1(
+                            self.ui_lang,
+                            "Window toggle hotkey changed to: {}",
+                            key_name,
+                        ));
                     }
                 }
             }
@@ -775,7 +926,8 @@ impl eframe::App for WisprFlowGui {
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.recording_mode = None;
                 PlatformManager::stop_recording_hotkey();
-                self.state.set_toast("Key recording cancelled");
+                self.state
+                    .set_toast(tr(self.ui_lang, "Key recording cancelled"));
             }
         }
 
@@ -815,6 +967,7 @@ impl eframe::App for WisprFlowGui {
         }
 
         Self::apply_custom_theme(ctx);
+        self.ui_lang = Lang::from_code(&self.settings_ui_language);
         self.animation_time += 0.04;
 
         let is_rec = self.state.is_recording.load(Ordering::SeqCst);
@@ -850,16 +1003,38 @@ impl eframe::App for WisprFlowGui {
         // button and the recording timer in sync.
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
 
-        // In-window hotkey trigger (mirrors the configured global hotkey)
+        // In-window fallback for the dictation hotkey.
+        //
+        // On X11 and Windows a system-wide hook already delivers the key, so
+        // running this as well would toggle dictation twice per press (start,
+        // then an immediate stop). It is only used where no global hook exists,
+        // for example a Wayland session.
         let hotkey_vk = self
             .state
             .config
             .lock()
             .map(|c| c.hotkey.key)
             .unwrap_or(0x77);
-        if self.recording_mode.is_none()
+        if !PlatformManager::has_global_hotkeys()
+            && self.recording_mode.is_none()
             && egui_key_from_vk(hotkey_vk)
-                .map(|key| ctx.input(|i| i.key_pressed(key)))
+                .map(|key| {
+                    ctx.input(|i| {
+                        // Ignore auto-repeat, which would otherwise toggle on
+                        // every repeat while the key is held down.
+                        i.events.iter().any(|event| {
+                            matches!(
+                                event,
+                                egui::Event::Key {
+                                    key: pressed_key,
+                                    pressed: true,
+                                    repeat: false,
+                                    ..
+                                } if *pressed_key == key
+                            )
+                        })
+                    })
+                })
                 .unwrap_or(false)
         {
             if is_rec {
@@ -901,7 +1076,17 @@ impl eframe::App for WisprFlowGui {
                 // Active Tab View
                 match self.active_tab {
                     ActiveTab::Studio => {
-                        self.render_studio_tab(ui, is_rec, amplitude, status, &dictate_key_name)
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                self.render_studio_tab(
+                                    ui,
+                                    is_rec,
+                                    amplitude,
+                                    status,
+                                    &dictate_key_name,
+                                );
+                            });
                     }
                     ActiveTab::History => self.render_history_tab(ui),
                     ActiveTab::Dictionary => self.render_dictionary_tab(ui),
@@ -928,6 +1113,7 @@ impl eframe::App for WisprFlowGui {
 ///
 /// Returns the label plus the fill / stroke / text colours.
 fn update_button_style(
+    lang: Lang,
     latest: Option<&str>,
     running: bool,
     current_version: &str,
@@ -937,7 +1123,7 @@ fn update_button_style(
         // Gentle pulse so the action is impossible to miss.
         let pulse = 0.5 + 0.5 * (animation_time * 3.0).sin();
         return (
-            format!("⬆️  อัปเดตใหม่ v{}", latest),
+            format!("⬆️  {}", tr1(lang, "New update v{}", latest)),
             Color32::from_rgb(22, 163, 74),
             Color32::from_rgb(74, 222, 128).gamma_multiply(0.65 + 0.35 * pulse),
             Color32::WHITE,
@@ -945,14 +1131,14 @@ fn update_button_style(
     }
     if running {
         return (
-            "⏳  กำลังตรวจสอบ...".to_string(),
+            format!("⏳  {}", tr(lang, "Checking...")),
             Color32::from_rgb(30, 41, 59),
             Color32::from_rgb(100, 116, 139),
             Color32::from_rgb(203, 213, 225),
         );
     }
     (
-        format!("🔄  อัปเดต · v{}", current_version),
+        format!("🔄  {}", tr1(lang, "Update · v{}", current_version)),
         Color32::from_rgb(30, 41, 59),
         Color32::from_rgb(71, 85, 105),
         Color32::from_rgb(203, 213, 225),
@@ -1027,6 +1213,7 @@ fn egui_key_from_vk(vk: u16) -> Option<egui::Key> {
 
 impl WisprFlowGui {
     fn render_sidebar(&mut self, ui: &mut egui::Ui, dictate_key_name: &str, toggle_key_name: &str) {
+        let lang = self.ui_lang;
         ui.vertical(|ui| {
             // App Brand Header
             ui.horizontal(|ui| {
@@ -1064,7 +1251,7 @@ impl WisprFlowGui {
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new("WFLOW")
-                                .font(FontId::proportional(17.0))
+                                .font(heading(17.0))
                                 .strong()
                                 .color(Color32::WHITE),
                         );
@@ -1081,7 +1268,7 @@ impl WisprFlowGui {
                         );
                     });
                     ui.label(
-                        egui::RichText::new("AI Voice Studio")
+                        egui::RichText::new(tr(lang, "AI Voice Studio"))
                             .font(FontId::proportional(11.0))
                             .color(Color32::from_rgb(148, 163, 184)),
                     );
@@ -1101,16 +1288,26 @@ impl WisprFlowGui {
             let update_badge = self.pending_update().is_some();
 
             let nav_items = [
-                (ActiveTab::Studio, "🎙️", "Live Studio", None),
-                (ActiveTab::History, "📜", "History", Some(history_count)),
-                (ActiveTab::Dictionary, "📖", "Dictionary", Some(dict_count)),
+                (ActiveTab::Studio, "🎙️", tr(lang, "Live Studio"), None),
+                (
+                    ActiveTab::History,
+                    "📜",
+                    tr(lang, "History"),
+                    Some(history_count),
+                ),
+                (
+                    ActiveTab::Dictionary,
+                    "📖",
+                    tr(lang, "Dictionary"),
+                    Some(dict_count),
+                ),
                 (
                     ActiveTab::Updates,
                     "🔄",
-                    "Updates",
+                    tr(lang, "Updates"),
                     if update_badge { Some(1) } else { None },
                 ),
-                (ActiveTab::Settings, "⚙️", "Settings", None),
+                (ActiveTab::Settings, "⚙️", tr(lang, "Settings"), None),
             ];
 
             for (tab, icon, label, count) in nav_items {
@@ -1212,7 +1409,7 @@ impl WisprFlowGui {
 
                 // 1. Explicit Exit Button
                 let exit_btn = egui::Button::new(
-                    egui::RichText::new(shape_thai("🔴 ปิดโปรแกรม (Exit)"))
+                    egui::RichText::new(shape_thai(&format!("🔴 {}", tr(lang, "Exit"))))
                         .font(FontId::proportional(11.5))
                         .color(Color32::from_rgb(252, 165, 165))
                         .strong(),
@@ -1230,14 +1427,17 @@ impl WisprFlowGui {
 
                 // 2. Minimize Button
                 let hide_btn = egui::Button::new(
-                    egui::RichText::new(shape_thai(&format!("📌 ย่อหน้าต่าง ({})", toggle_key_name)))
-                        .font(FontId::proportional(11.5))
-                        .color(Color32::from_rgb(203, 213, 225)),
+                    egui::RichText::new(shape_thai(&format!(
+                        "📌 {}",
+                        tr1(lang, "Minimize ({})", toggle_key_name)
+                    )))
+                    .font(FontId::proportional(11.5))
+                    .color(Color32::from_rgb(203, 213, 225)),
                 )
                 .fill(Color32::from_rgb(22, 29, 44))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(38, 50, 74)))
                 .rounding(Rounding::same(7.0))
-                .min_size(Vec2::new(ui.available_width(), 30.0));
+                .min_size(Vec2::new(ui.available_width(), 34.0));
 
                 if ui.add(hide_btn).clicked() {
                     #[cfg(target_os = "windows")]
@@ -1249,8 +1449,11 @@ impl WisprFlowGui {
                         crate::platform::PlatformManager::hide_main_window();
                     }
                     self.state.window_visible.store(false, Ordering::SeqCst);
-                    self.state
-                        .set_toast(&format!("Minimized. Press {} to reopen.", toggle_key_name));
+                    self.state.set_toast(&tr1(
+                        lang,
+                        "Minimized to Tray. Press {} to reopen.",
+                        toggle_key_name,
+                    ));
                 }
 
                 ui.add_space(8.0);
@@ -1262,148 +1465,166 @@ impl WisprFlowGui {
                     .rounding(Rounding::same(9.0))
                     .inner_margin(egui::Margin::same(10.0))
                     .show(ui, |ui| {
-                        let cfg = lock(&self.state.config);
-                        let prov_badge = match cfg.stt_provider {
-                            SttProvider::WisprFlow => {
-                                ("⚡ Wispr Flow", Color32::from_rgb(129, 140, 248))
-                            }
-                            SttProvider::Groq => {
-                                ("🚀 Groq Whisper", Color32::from_rgb(251, 146, 60))
-                            }
-                            SttProvider::ElevenLabs => {
-                                ("🎙️ ElevenLabs", Color32::from_rgb(192, 132, 252))
-                            }
-                        };
+                        // The sidebar footer uses a bottom-up layout, which
+                        // would reverse these rows. Give the card its own
+                        // normal top-down flow.
+                        ui.vertical(|ui| {
+                            // Read the few settings the card needs and
+                            // release the config lock right away: holding it
+                            // across the whole card would block the settings
+                            // page and the update checker.
+                            let (prov_badge, mic_label) = {
+                                let cfg = lock(&self.state.config);
+                                let prov_badge = match cfg.stt_provider {
+                                    SttProvider::WisprFlow => {
+                                        ("⚡ Wispr Flow", Color32::from_rgb(129, 140, 248))
+                                    }
+                                    SttProvider::Groq => {
+                                        ("🚀 Groq Whisper", Color32::from_rgb(251, 146, 60))
+                                    }
+                                    SttProvider::ElevenLabs => {
+                                        ("🎙️ ElevenLabs", Color32::from_rgb(192, 132, 252))
+                                    }
+                                };
 
-                        let mic_label = if let Some(ref m) = cfg.input_device_name {
-                            if m.len() > 18 {
-                                format!("{}...", &m[..15])
-                            } else {
-                                m.clone()
-                            }
-                        } else {
-                            "Default Mic".to_string()
-                        };
+                                let mic_label = if let Some(ref m) = cfg.input_device_name {
+                                    if m.len() > 18 {
+                                        format!("{}...", &m[..15])
+                                    } else {
+                                        m.clone()
+                                    }
+                                } else {
+                                    tr(lang, "Default Mic").to_string()
+                                };
+                                (prov_badge, mic_label)
+                            };
 
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("ENGINE")
-                                    .font(FontId::proportional(9.0))
-                                    .color(Color32::from_rgb(148, 163, 184)),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(
-                                        egui::RichText::new(prov_badge.0)
-                                            .font(FontId::proportional(10.5))
-                                            .color(prov_badge.1)
-                                            .strong(),
-                                    );
-                                },
-                            );
-                        });
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(tr(lang, "ENGINE"))
+                                        .font(FontId::proportional(9.0))
+                                        .color(Color32::from_rgb(148, 163, 184)),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new(prov_badge.0)
+                                                .font(FontId::proportional(10.5))
+                                                .color(prov_badge.1)
+                                                .strong(),
+                                        );
+                                    },
+                                );
+                            });
 
-                        ui.add_space(4.0);
+                            ui.add_space(4.0);
 
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("MIC")
-                                    .font(FontId::proportional(9.0))
-                                    .color(Color32::from_rgb(148, 163, 184)),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(
-                                        egui::RichText::new(format!("🎤 {}", mic_label))
-                                            .font(FontId::proportional(10.5))
-                                            .color(Color32::from_rgb(203, 213, 225)),
-                                    );
-                                },
-                            );
-                        });
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(tr(lang, "MIC"))
+                                        .font(FontId::proportional(9.0))
+                                        .color(Color32::from_rgb(148, 163, 184)),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("🎤 {}", mic_label))
+                                                .font(FontId::proportional(10.5))
+                                                .color(Color32::from_rgb(203, 213, 225)),
+                                        );
+                                    },
+                                );
+                            });
 
-                        ui.add_space(4.0);
+                            ui.add_space(4.0);
 
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("HOTKEY")
-                                    .font(FontId::proportional(9.0))
-                                    .color(Color32::from_rgb(148, 163, 184)),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(
-                                        egui::RichText::new(format!("[{}]", dictate_key_name))
-                                            .font(FontId::monospace(10.5))
-                                            .color(Color32::from_rgb(56, 189, 248))
-                                            .strong(),
-                                    );
-                                },
-                            );
-                        });
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(tr(lang, "HOTKEY"))
+                                        .font(FontId::proportional(9.0))
+                                        .color(Color32::from_rgb(148, 163, 184)),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("[{}]", dictate_key_name))
+                                                .font(FontId::monospace(10.5))
+                                                .color(Color32::from_rgb(56, 189, 248))
+                                                .strong(),
+                                        );
+                                    },
+                                );
+                            });
 
-                        ui.add_space(4.0);
+                            ui.add_space(4.0);
 
-                        let pending = self.pending_update();
-                        let pending_download = pending.as_ref().map(|i| i.download_url.clone());
-                        let pending_latest = pending.as_ref().map(|i| i.latest.to_string());
-                        let (version_text, version_color) = match pending_latest.as_ref() {
-                            Some(latest) => (
-                                format!("v{} ⬆️ v{}", crate::update::current_version(), latest),
-                                Color32::from_rgb(74, 222, 128),
-                            ),
-                            None => (
-                                format!("v{}", crate::update::current_version()),
-                                Color32::from_rgb(203, 213, 225),
-                            ),
-                        };
+                            let pending = self.pending_update();
+                            let pending_download = pending.as_ref().map(|i| i.download_url.clone());
+                            let pending_latest = pending.as_ref().map(|i| i.latest.to_string());
+                            let (version_text, version_color) = match pending_latest.as_ref() {
+                                Some(latest) => (
+                                    format!("v{} ⬆️ v{}", crate::update::current_version(), latest),
+                                    Color32::from_rgb(74, 222, 128),
+                                ),
+                                None => (
+                                    format!("v{}", crate::update::current_version()),
+                                    Color32::from_rgb(203, 213, 225),
+                                ),
+                            };
 
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("VERSION")
-                                    .font(FontId::proportional(9.0))
-                                    .color(Color32::from_rgb(148, 163, 184)),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let galley = ui.painter().layout_no_wrap(
-                                        version_text.clone(),
-                                        FontId::monospace(10.5),
-                                        version_color,
-                                    );
-                                    let (rect, response) =
-                                        ui.allocate_exact_size(galley.size(), Sense::click());
-                                    ui.painter().text(
-                                        rect.min,
-                                        egui::Align2::LEFT_TOP,
-                                        &version_text,
-                                        FontId::monospace(10.5),
-                                        version_color,
-                                    );
-                                    if response.clicked() {
-                                        if let (Some(url), Some(latest)) =
-                                            (pending_download.as_ref(), pending_latest.as_ref())
-                                        {
-                                            let _ =
-                                                self.event_tx.send(GuiEvent::OpenUrl(url.clone()));
-                                            self.state.set_toast(&format!(
-                                                "กำลังเปิดหน้าดาวน์โหลด v{}",
-                                                latest
-                                            ));
-                                        } else {
-                                            let _ = self.event_tx.send(GuiEvent::CheckUpdate);
-                                            self.state.set_toast("กำลังตรวจสอบอัปเดต...");
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(tr(lang, "VERSION"))
+                                        .font(FontId::proportional(9.0))
+                                        .color(Color32::from_rgb(148, 163, 184)),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let galley = ui.painter().layout_no_wrap(
+                                            version_text.clone(),
+                                            FontId::monospace(10.5),
+                                            version_color,
+                                        );
+                                        let (rect, response) =
+                                            ui.allocate_exact_size(galley.size(), Sense::click());
+                                        ui.painter().text(
+                                            rect.min,
+                                            egui::Align2::LEFT_TOP,
+                                            &version_text,
+                                            FontId::monospace(10.5),
+                                            version_color,
+                                        );
+                                        if response.clicked() {
+                                            if let (Some(url), Some(latest)) =
+                                                (pending_download.as_ref(), pending_latest.as_ref())
+                                            {
+                                                let _ = self
+                                                    .event_tx
+                                                    .send(GuiEvent::OpenUrl(url.clone()));
+                                                self.state.set_toast(&tr1(
+                                                    lang,
+                                                    "Opening the download page for v{}",
+                                                    latest,
+                                                ));
+                                            } else {
+                                                let _ = self.event_tx.send(GuiEvent::CheckUpdate);
+                                                self.state
+                                                    .set_toast(tr(lang, "Checking for updates..."));
+                                            }
                                         }
-                                    }
-                                    if response.hovered() {
-                                        response.show_tooltip_text("คลิกเพื่อตรวจสอบ/ดาวน์โหลดอัปเดต");
-                                    }
-                                },
-                            );
+                                        if response.hovered() {
+                                            response.show_tooltip_text(tr(
+                                                lang,
+                                                "Click to check for or download an update",
+                                            ));
+                                        }
+                                    },
+                                );
+                            });
                         });
                     });
 
@@ -1420,6 +1641,7 @@ impl WisprFlowGui {
         dictate_key_name: &str,
         _toggle_key_name: &str,
     ) {
+        let lang = self.ui_lang;
         // The update button never moves to another tab and is never hidden.
         // The decision whether it needs its own row is made from the full
         // width of the panel, *before* the title takes up any space.
@@ -1427,6 +1649,7 @@ impl WisprFlowGui {
         let update_running = self.state.update_check_running.load(Ordering::SeqCst);
         let current_version = crate::update::current_version().to_string();
         let (update_label, update_fill, update_stroke, update_text) = update_button_style(
+            self.ui_lang,
             update_available
                 .as_ref()
                 .map(|i| i.latest.to_string())
@@ -1465,9 +1688,9 @@ impl WisprFlowGui {
                 }
                 if response.hovered() {
                     let tip = if update_available.is_some() {
-                        "คลิกเพื่อดาวน์โหลดเวอร์ชันใหม่"
+                        tr(self.ui_lang, "Download the new version")
                     } else {
-                        "คลิกเพื่อตรวจสอบอัปเดต"
+                        tr(self.ui_lang, "Check for updates")
                     };
                     response.show_tooltip_text(tip);
                 }
@@ -1478,31 +1701,34 @@ impl WisprFlowGui {
         ui.horizontal(|ui| {
             let (title, subtitle) = match self.active_tab {
                 ActiveTab::Studio => (
-                    "🎙️ Live Speech Studio",
-                    "Zero-latency real-time voice typing",
+                    format!("🎙️ {}", tr(lang, "Live Speech Studio")),
+                    tr(lang, "Zero-latency real-time voice typing"),
                 ),
                 ActiveTab::History => (
-                    "📜 Dictation History",
-                    "Search, copy, or re-paste past speech",
+                    format!("📜 {}", tr(lang, "Dictation History")),
+                    tr(lang, "Search, copy, or re-paste past speech"),
                 ),
                 ActiveTab::Dictionary => (
-                    "📖 Custom Vocabulary & Snippets",
-                    "Domain terminology and text expansion shortcuts",
+                    format!("📖 {}", tr(lang, "Custom Vocabulary & Snippets")),
+                    tr(lang, "Domain terminology and text expansion shortcuts"),
                 ),
                 ActiveTab::Updates => (
-                    "🔄 Software Updates",
-                    "Check for a new version of Wflow and download it",
+                    format!("🔄 {}", tr(lang, "Software Updates")),
+                    tr(lang, "Check for a new version of Wflow and download it"),
                 ),
                 ActiveTab::Settings => (
-                    "⚙️ Settings & Audio Hardware",
-                    "Configure microphones, AI models, and keyboard shortcuts",
+                    format!("⚙️ {}", tr(lang, "Settings & Audio Hardware")),
+                    tr(
+                        lang,
+                        "Configure microphones, AI models, and keyboard shortcuts",
+                    ),
                 ),
             };
 
             ui.vertical(|ui| {
                 ui.label(
                     egui::RichText::new(title)
-                        .font(FontId::proportional(16.5))
+                        .font(heading(16.5))
                         .strong()
                         .color(Color32::WHITE),
                 );
@@ -1517,7 +1743,7 @@ impl WisprFlowGui {
                 // Quick Dictate Action Button
                 let quick_btn = if is_rec {
                     egui::Button::new(
-                        egui::RichText::new(shape_thai("⏹️ หยุด (Stop)"))
+                        egui::RichText::new(shape_thai(&format!("⏹️ {}", tr(lang, "Stop"))))
                             .font(FontId::proportional(12.0))
                             .color(Color32::WHITE)
                             .strong(),
@@ -1527,7 +1753,7 @@ impl WisprFlowGui {
                     .rounding(Rounding::same(8.0))
                 } else {
                     egui::Button::new(
-                        egui::RichText::new(shape_thai("🎙️ เริ่มพูด (Dictate)"))
+                        egui::RichText::new(shape_thai(&format!("🎙️ {}", tr(lang, "Dictate"))))
                             .font(FontId::proportional(12.0))
                             .color(Color32::WHITE)
                             .strong(),
@@ -1548,32 +1774,32 @@ impl WisprFlowGui {
                 ui.add_space(8.0);
                 let (status_text, bg_color, border_color) = match status {
                     DictationStatus::Idle => (
-                        format!("● Ready [{}]", dictate_key_name),
+                        tr1(lang, "Ready [{}]", dictate_key_name),
                         Color32::from_rgb(6, 78, 59),
                         Color32::from_rgb(16, 185, 129),
                     ),
                     DictationStatus::Listening => (
-                        "🔴 Recording...".to_string(),
+                        format!("🔴 {}", tr(lang, "Recording...")),
                         Color32::from_rgb(127, 29, 29),
                         Color32::from_rgb(239, 68, 68),
                     ),
                     DictationStatus::Transcribing => (
-                        "✨ AI Processing...".to_string(),
+                        format!("✨ {}", tr(lang, "AI Processing...")),
                         Color32::from_rgb(88, 28, 135),
                         Color32::from_rgb(168, 85, 247),
                     ),
                     DictationStatus::Pasting => (
-                        "✍️ Pasting Text...".to_string(),
+                        format!("✍️ {}", tr(lang, "Pasting Text...")),
                         Color32::from_rgb(30, 58, 138),
                         Color32::from_rgb(59, 130, 246),
                     ),
                     DictationStatus::Done => (
-                        "✔ Inserted!".to_string(),
+                        format!("✔ {}", tr(lang, "Inserted!")),
                         Color32::from_rgb(6, 78, 59),
                         Color32::from_rgb(16, 185, 129),
                     ),
                     DictationStatus::Error => (
-                        "⚠️ Audio Error".to_string(),
+                        format!("⚠️ {}", tr(lang, "Audio Error")),
                         Color32::from_rgb(120, 53, 15),
                         Color32::from_rgb(245, 158, 11),
                     ),
@@ -1613,7 +1839,7 @@ impl WisprFlowGui {
                     active_app.process_name.clone()
                 };
 
-                let ctx_label = format!("🎯 Focus: {}", app_display);
+                let ctx_label = format!("🎯 {}", tr1(lang, "Focus: {}", app_display));
                 let ctx_galley = ui.painter().layout_no_wrap(
                     ctx_label.clone(),
                     FontId::proportional(11.5),
@@ -1652,6 +1878,7 @@ impl WisprFlowGui {
         status: DictationStatus,
         dictate_key_name: &str,
     ) {
+        let lang = self.ui_lang;
         ui.columns(2, |cols| {
             // LEFT COLUMN: Live Audio Visualizer & Controls
             cols[0].vertical(|ui| {
@@ -1663,7 +1890,10 @@ impl WisprFlowGui {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new("🎙️  AUDIO CAPTURE & WAVEFORM")
+                                egui::RichText::new(format!(
+                                    "🎙️  {}",
+                                    tr(lang, "AUDIO CAPTURE & WAVEFORM")
+                                ))
                                     .font(FontId::proportional(12.0))
                                     .color(Color32::from_rgb(148, 163, 184))
                                     .strong(),
@@ -1684,9 +1914,15 @@ impl WisprFlowGui {
                                 };
 
                                 let (label, color) = if speaking {
-                                    ("🗣️ กำลังพูด", Color32::from_rgb(74, 222, 128))
+                                    (
+                                        format!("🗣️ {}", tr(lang, "Speaking")),
+                                        Color32::from_rgb(74, 222, 128),
+                                    )
                                 } else {
-                                    ("🤫 เสียงเงียบ", Color32::from_rgb(148, 163, 184))
+                                    (
+                                        format!("🤫 {}", tr(lang, "Silent")),
+                                        Color32::from_rgb(148, 163, 184),
+                                    )
                                 };
 
                                 let pill = ui.label(
@@ -1720,7 +1956,10 @@ impl WisprFlowGui {
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let pill = ui.label(
-                                        egui::RichText::new(format!("🔴 LIVE • {}", time_str))
+                                        egui::RichText::new(format!(
+                                            "🔴 {}",
+                                            tr1(lang, "LIVE • {}", time_str)
+                                        ))
                                             .font(FontId::monospace(11.5))
                                             .color(Color32::from_rgb(254, 202, 202))
                                             .strong(),
@@ -1805,16 +2044,34 @@ impl WisprFlowGui {
                         // Hero Action Button
                         let is_tap = self.settings_recording_trigger_mode == "tap_to_toggle";
                         let dictate_btn_text = if is_tap {
-                            format!("🎙️  START DICTATING (OR TAP {})", dictate_key_name)
+                            format!(
+                                "🎙️  {}",
+                                tr1(lang, "START DICTATING (OR TAP {})", dictate_key_name)
+                            )
                         } else {
-                            format!("🎙️  START DICTATING (OR HOLD {})", dictate_key_name)
+                            format!(
+                                "🎙️  {}",
+                                tr1(lang, "START DICTATING (OR HOLD {})", dictate_key_name)
+                            )
                         };
                         let (btn_text, btn_bg, btn_stroke) = if is_rec {
-                            ("⏹️  CLICK TO COMMIT & INSERT", Color32::from_rgb(220, 38, 38), Color32::from_rgb(248, 113, 113))
+                            (
+                                format!("⏹️  {}", tr(lang, "CLICK TO COMMIT & INSERT")),
+                                Color32::from_rgb(220, 38, 38),
+                                Color32::from_rgb(248, 113, 113),
+                            )
                         } else if status == DictationStatus::Transcribing {
-                            ("✨  AI TRANSCRIBING...", Color32::from_rgb(124, 58, 237), Color32::from_rgb(168, 85, 247))
+                            (
+                                format!("✨  {}", tr(lang, "AI TRANSCRIBING...")),
+                                Color32::from_rgb(124, 58, 237),
+                                Color32::from_rgb(168, 85, 247),
+                            )
                         } else {
-                            (dictate_btn_text.as_str(), Color32::from_rgb(79, 70, 229), Color32::from_rgb(129, 140, 248))
+                            (
+                                dictate_btn_text,
+                                Color32::from_rgb(79, 70, 229),
+                                Color32::from_rgb(129, 140, 248),
+                            )
                         };
 
                         let hero_btn = egui::Button::new(
@@ -1838,9 +2095,23 @@ impl WisprFlowGui {
 
                         ui.add_space(8.0);
                         let tip_text = if is_tap {
-                            format!("💡 Tap {} once to start dictating hands-free, tap again to commit and insert text.", dictate_key_name)
+                            format!(
+                                "💡 {}",
+                                tr1(
+                                    lang,
+                                    "Tap {} once to start dictating hands-free, tap again to commit and insert text.",
+                                    dictate_key_name,
+                                )
+                            )
                         } else {
-                            format!("💡 Hold {} anywhere across Windows to dictate directly into any active text box.", dictate_key_name)
+                            format!(
+                                "💡 {}",
+                                tr1(
+                                    lang,
+                                    "Hold {} while speaking to dictate directly into any text box.",
+                                    dictate_key_name,
+                                )
+                            )
                         };
                         ui.label(
                             egui::RichText::new(tip_text)
@@ -1860,7 +2131,10 @@ impl WisprFlowGui {
                     .inner_margin(egui::Margin::same(14.0))
                     .show(ui, |ui| {
                         ui.label(
-                            egui::RichText::new("🎯  TARGET APPLICATION CONTEXT")
+                            egui::RichText::new(format!(
+                                "🎯  {}",
+                                tr(lang, "TARGET APPLICATION CONTEXT")
+                            ))
                                 .font(FontId::proportional(12.0))
                                 .color(Color32::from_rgb(148, 163, 184))
                                 .strong(),
@@ -1869,7 +2143,7 @@ impl WisprFlowGui {
 
                         ui.horizontal(|ui| {
                             let proc_text = if active_app.process_name.is_empty() {
-                                "Desktop Cursor".to_string()
+                                tr(lang, "Desktop Cursor").to_string()
                             } else {
                                 active_app.process_name.clone()
                             };
@@ -1905,7 +2179,11 @@ impl WisprFlowGui {
                                     .inner_margin(egui::Margin::same(8.0))
                                     .show(ui, |ui| {
                                         ui.label(
-                                            egui::RichText::new(format!("Before Cursor: \"{}\"", before))
+                                            egui::RichText::new(tr1(
+                                                lang,
+                                                "Before Cursor: \"{}\"",
+                                                before,
+                                            ))
                                                 .font(FontId::proportional(11.0))
                                                 .italics()
                                                 .color(Color32::from_rgb(203, 213, 225)),
@@ -1935,13 +2213,22 @@ impl WisprFlowGui {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new("⚡  ACTIVE AI SPEECH ENGINE & MODEL")
+                                egui::RichText::new(format!(
+                                    "⚡  {}",
+                                    tr(lang, "AI SPEECH ENGINE")
+                                ))
                                     .font(FontId::proportional(12.0))
                                     .color(Color32::from_rgb(148, 163, 184))
                                     .strong(),
                             );
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("⚙️ Switch Model").clicked() {
+                                if ui
+                                    .small_button(format!(
+                                        "⚙️ {}",
+                                        tr(lang, "Switch Model")
+                                    ))
+                                    .clicked()
+                                {
                                     self.active_tab = ActiveTab::Settings;
                                 }
                             });
@@ -1961,7 +2248,7 @@ impl WisprFlowGui {
                             );
 
                             ui.label(
-                                egui::RichText::new(format!("Model: {}", model_name))
+                                egui::RichText::new(tr1(lang, "Model: {}", model_name))
                                     .font(FontId::proportional(12.5))
                                     .color(Color32::WHITE)
                                     .strong(),
@@ -1980,7 +2267,10 @@ impl WisprFlowGui {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new("📝  LATEST TRANSCRIPTION")
+                                egui::RichText::new(format!(
+                                    "📝  {}",
+                                    tr(lang, "LATEST TRANSCRIPTION")
+                                ))
                                     .font(FontId::proportional(12.0))
                                     .color(Color32::from_rgb(148, 163, 184))
                                     .strong(),
@@ -2015,15 +2305,18 @@ impl WisprFlowGui {
                                     ui.add_space(35.0);
                                     ui.vertical_centered(|ui| {
                                         ui.label(
-                                            egui::RichText::new("No recent transcript.")
+                                            egui::RichText::new(tr(lang, "No recent transcript."))
                                                 .font(FontId::proportional(13.5))
                                                 .color(Color32::from_rgb(100, 116, 139)),
                                         );
-                                        let empty_hint = format!("Press {} and speak clearly into your mic.", dictate_key_name);
                                         ui.label(
-                                            egui::RichText::new(empty_hint)
-                                                .font(FontId::proportional(11.0))
-                                                .color(Color32::from_rgb(71, 85, 105)),
+                                            egui::RichText::new(tr1(
+                                                lang,
+                                                "Press {} and speak clearly into your mic.",
+                                                dictate_key_name,
+                                            ))
+                                            .font(FontId::proportional(11.0))
+                                            .color(Color32::from_rgb(71, 85, 105)),
                                         );
                                     });
                                     ui.add_space(20.0);
@@ -2040,58 +2333,71 @@ impl WisprFlowGui {
                         ui.separator();
                         ui.add_space(6.0);
 
-                        ui.horizontal(|ui| {
-                            if !transcript.is_empty() {
-                                let word_count = transcript.split_whitespace().count();
-                                let char_count = transcript.chars().count();
-                                ui.label(
-                                    egui::RichText::new(format!("{} words • {} chars", word_count, char_count))
-                                        .font(FontId::proportional(11.0))
-                                        .color(Color32::from_rgb(148, 163, 184)),
-                                );
+                        if !transcript.is_empty() {
+                            let word_count = transcript.split_whitespace().count();
+                            let char_count = transcript.chars().count();
+                            ui.label(
+                                egui::RichText::new(tr2(
+                                    lang,
+                                    "{} words • {} chars",
+                                    word_count,
+                                    char_count,
+                                ))
+                                .font(FontId::proportional(11.0))
+                                .color(Color32::from_rgb(148, 163, 184)),
+                            );
+                            ui.add_space(6.0);
 
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    // Re-paste Button
-                                    let paste_btn = egui::Button::new("✍️ Re-paste to Window")
+                            // Wrapped rather than right-aligned: three
+                            // buttons plus the counter never fit on one line
+                            // in a narrow card and used to overlap.
+                            ui.horizontal_wrapped(|ui| {
+                                let paste_btn =
+                                    egui::Button::new(format!("✍️ {}", tr(lang, "Re-paste")))
                                         .fill(Color32::from_rgb(49, 46, 129))
-                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(99, 102, 241)))
+                                        .stroke(Stroke::new(
+                                            1.0_f32,
+                                            Color32::from_rgb(99, 102, 241),
+                                        ))
                                         .rounding(Rounding::same(6.0));
+                                if ui.add(paste_btn).clicked() {
+                                    let _ = PlatformManager::paste_text(&transcript);
+                                    self.state.set_toast(tr(
+                                        lang,
+                                        "Re-pasted transcript to active cursor!",
+                                    ));
+                                }
 
-                                    if ui.add(paste_btn).clicked() {
-                                        let _ = PlatformManager::paste_text(&transcript);
-                                        self.state.set_toast("Re-pasted transcript to active cursor!");
-                                    }
-
-                                    ui.add_space(4.0);
-
-                                    // Copy Button
-                                    let copy_btn = egui::Button::new("📋 Copy Text")
+                                let copy_btn =
+                                    egui::Button::new(format!("📋 {}", tr(lang, "Copy")))
                                         .fill(Color32::from_rgb(33, 43, 64))
-                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(51, 65, 85)))
+                                        .stroke(Stroke::new(
+                                            1.0_f32,
+                                            Color32::from_rgb(51, 65, 85),
+                                        ))
                                         .rounding(Rounding::same(6.0));
-
-                                    if ui.add(copy_btn).clicked() {
-                                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                            let _ = clipboard.set_text(&transcript);
-                                            self.state.set_toast("Copied transcript to clipboard!");
-                                        }
+                                if ui.add(copy_btn).clicked() {
+                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                        let _ = clipboard.set_text(&transcript);
+                                        self.state
+                                            .set_toast(tr(lang, "Copied transcript to clipboard!"));
                                     }
+                                }
 
-                                    ui.add_space(4.0);
-
-                                    // Clear Button
-                                    let clear_btn = egui::Button::new("🗑️ Clear")
+                                let clear_btn =
+                                    egui::Button::new(format!("🗑️ {}", tr(lang, "Clear")))
                                         .fill(Color32::from_rgb(33, 43, 64))
-                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(51, 65, 85)))
+                                        .stroke(Stroke::new(
+                                            1.0_f32,
+                                            Color32::from_rgb(51, 65, 85),
+                                        ))
                                         .rounding(Rounding::same(6.0));
-
-                                    if ui.add(clear_btn).clicked() {
-                                        *lock(&self.state.last_transcript) = String::new();
-                                        self.state.set_toast("Transcript cleared");
-                                    }
-                                });
-                            }
-                        });
+                                if ui.add(clear_btn).clicked() {
+                                    *lock(&self.state.last_transcript) = String::new();
+                                    self.state.set_toast(tr(lang, "Transcript cleared"));
+                                }
+                            });
+                        }
                     });
 
                 ui.add_space(10.0);
@@ -2105,17 +2411,23 @@ impl WisprFlowGui {
                     .inner_margin(egui::Margin::same(14.0))
                     .show(ui, |ui| {
                         ui.columns(3, |stat_cols| {
+                            let last_latency = *lock(&self.state.last_latency);
+                            let latency_text = if last_latency > 0.0 {
+                                format!("{:.0} ms", last_latency * 1000.0)
+                            } else {
+                                "—".to_string()
+                            };
                             stat_cols[0].vertical(|ui| {
-                                ui.label(egui::RichText::new("RECORDED").font(FontId::proportional(10.0)).color(Color32::from_rgb(148, 163, 184)));
-                                ui.label(egui::RichText::new(format!("{} Entries", history_count)).font(FontId::proportional(14.0)).strong().color(Color32::from_rgb(167, 139, 250)));
+                                ui.label(egui::RichText::new(tr(lang, "RECORDED")).font(FontId::proportional(10.0)).color(Color32::from_rgb(148, 163, 184)));
+                                ui.label(egui::RichText::new(tr1(lang, "{} Entries", history_count)).font(heading(14.0)).strong().color(Color32::from_rgb(167, 139, 250)));
                             });
                             stat_cols[1].vertical(|ui| {
-                                ui.label(egui::RichText::new("LATENCY").font(FontId::proportional(10.0)).color(Color32::from_rgb(148, 163, 184)));
-                                ui.label(egui::RichText::new("~220 ms").font(FontId::proportional(14.0)).strong().color(Color32::from_rgb(52, 211, 153)));
+                                ui.label(egui::RichText::new(tr(lang, "LATENCY")).font(FontId::proportional(10.0)).color(Color32::from_rgb(148, 163, 184)));
+                                ui.label(egui::RichText::new(latency_text).font(heading(14.0)).strong().color(Color32::from_rgb(52, 211, 153)));
                             });
                             stat_cols[2].vertical(|ui| {
-                                ui.label(egui::RichText::new("STORAGE").font(FontId::proportional(10.0)).color(Color32::from_rgb(148, 163, 184)));
-                                ui.label(egui::RichText::new("SQLite Local").font(FontId::proportional(14.0)).strong().color(Color32::from_rgb(56, 189, 248)));
+                                ui.label(egui::RichText::new(tr(lang, "STORAGE")).font(FontId::proportional(10.0)).color(Color32::from_rgb(148, 163, 184)));
+                                ui.label(egui::RichText::new(tr(lang, "SQLite Local")).font(heading(14.0)).strong().color(Color32::from_rgb(56, 189, 248)));
                             });
                         });
                     });
@@ -2132,13 +2444,19 @@ impl WisprFlowGui {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new("🕒  RECENT ACTIVITY")
+                                egui::RichText::new(format!(
+                                    "🕒  {}",
+                                    tr(lang, "RECENT ACTIVITY")
+                                ))
                                     .font(FontId::proportional(12.0))
                                     .color(Color32::from_rgb(148, 163, 184))
                                     .strong(),
                             );
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("View All ➔").clicked() {
+                                if ui
+                                    .small_button(tr(lang, "View All →"))
+                                    .clicked()
+                                {
                                     self.active_tab = ActiveTab::History;
                                     let _ = self.event_tx.send(GuiEvent::RefreshHistory);
                                 }
@@ -2148,14 +2466,21 @@ impl WisprFlowGui {
 
                         if recent_items.is_empty() {
                             ui.label(
-                                egui::RichText::new("No recent transcriptions yet. Dictate anywhere to see activity.")
+                                egui::RichText::new(tr(
+                                    lang,
+                                    "No recent transcriptions yet. Dictate anywhere to see activity.",
+                                ))
                                     .font(FontId::proportional(11.0))
                                     .color(Color32::from_rgb(100, 116, 139)),
                             );
                         } else {
                             for item in recent_items {
                                 ui.horizontal(|ui| {
-                                    let app_label = if item.app.is_empty() { "Desktop" } else { &item.app };
+                                    let app_label = if item.app.is_empty() {
+                                        tr(lang, "Desktop")
+                                    } else {
+                                        item.app.as_str()
+                                    };
                                     ui.label(
                                         egui::RichText::new(format!("⚡ {}", app_label))
                                             .font(FontId::proportional(10.5))
@@ -2166,20 +2491,36 @@ impl WisprFlowGui {
                                     } else {
                                         item.formatted_text.clone()
                                     };
-                                    ui.label(
-                                        egui::RichText::new(snippet)
-                                            .font(FontId::proportional(11.0))
-                                            .color(Color32::from_rgb(203, 213, 225)),
+
+                                    // Reserve room for the copy button; a long
+                                    // snippet used to be painted underneath it.
+                                    let text_width = (ui.available_width() - 34.0).max(40.0);
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(text_width, 18.0),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(snippet)
+                                                        .font(FontId::proportional(11.0))
+                                                        .color(Color32::from_rgb(203, 213, 225)),
+                                                )
+                                                .truncate(),
+                                            );
+                                        },
                                     );
 
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.small_button("📋").on_hover_text("Copy text").clicked() {
-                                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                                let _ = clipboard.set_text(&item.formatted_text);
-                                                self.state.set_toast("Copied to clipboard!");
-                                            }
+                                    if ui
+                                        .small_button("📋")
+                                        .on_hover_text(tr(lang, "Copy"))
+                                        .clicked()
+                                    {
+                                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                            let _ = clipboard.set_text(&item.formatted_text);
+                                            self.state
+                                                .set_toast(tr(lang, "Copied to clipboard!"));
                                         }
-                                    });
+                                    }
                                 });
                                 ui.add_space(2.0);
                             }
@@ -2190,6 +2531,7 @@ impl WisprFlowGui {
     }
 
     fn render_history_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.ui_lang;
         let history = lock(&self.state.history).clone();
 
         // 1. Top Summary Banner
@@ -2210,13 +2552,13 @@ impl WisprFlowGui {
                         ui.label("📊");
                         ui.vertical(|ui| {
                             ui.label(
-                                egui::RichText::new("Total Transcriptions")
+                                egui::RichText::new(tr(lang, "Total Transcriptions"))
                                     .font(FontId::proportional(11.0))
                                     .color(Color32::from_rgb(148, 163, 184)),
                             );
                             ui.label(
-                                egui::RichText::new(format!("{} recorded", history.len()))
-                                    .font(FontId::proportional(14.0))
+                                egui::RichText::new(tr1(lang, "{} recorded", history.len()))
+                                    .font(heading(14.0))
                                     .strong()
                                     .color(Color32::WHITE),
                             );
@@ -2226,13 +2568,13 @@ impl WisprFlowGui {
                         ui.label("📝");
                         ui.vertical(|ui| {
                             ui.label(
-                                egui::RichText::new("Dictated Words")
+                                egui::RichText::new(tr(lang, "Dictated Words"))
                                     .font(FontId::proportional(11.0))
                                     .color(Color32::from_rgb(148, 163, 184)),
                             );
                             ui.label(
-                                egui::RichText::new(format!("{} words", total_words))
-                                    .font(FontId::proportional(14.0))
+                                egui::RichText::new(tr1(lang, "{} words", total_words))
+                                    .font(heading(14.0))
                                     .strong()
                                     .color(Color32::from_rgb(167, 139, 250)),
                             );
@@ -2242,15 +2584,19 @@ impl WisprFlowGui {
                         ui.label("⏱️");
                         ui.vertical(|ui| {
                             ui.label(
-                                egui::RichText::new("Total Voice Time")
+                                egui::RichText::new(tr(lang, "Total Voice Time"))
                                     .font(FontId::proportional(11.0))
                                     .color(Color32::from_rgb(148, 163, 184)),
                             );
                             ui.label(
-                                egui::RichText::new(format!("{:.1} seconds", total_duration))
-                                    .font(FontId::proportional(14.0))
-                                    .strong()
-                                    .color(Color32::from_rgb(52, 211, 153)),
+                                egui::RichText::new(tr1(
+                                    lang,
+                                    "{} seconds",
+                                    format!("{:.1}", total_duration),
+                                ))
+                                .font(heading(14.0))
+                                .strong()
+                                .color(Color32::from_rgb(52, 211, 153)),
                             );
                         });
                     });
@@ -2264,17 +2610,20 @@ impl WisprFlowGui {
             ui.label("🔍");
             ui.add(
                 egui::TextEdit::singleline(&mut self.search_query)
-                    .hint_text("Search transcripts by keywords or application name...")
+                    .hint_text(tr(
+                        lang,
+                        "Search transcripts by keywords or application name...",
+                    ))
                     .desired_width(ui.available_width() - 120.0),
             );
 
-            let refresh_btn = egui::Button::new("🔄 Refresh")
+            let refresh_btn = egui::Button::new(format!("🔄 {}", tr(lang, "Refresh")))
                 .fill(Color32::from_rgb(33, 44, 66))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(51, 65, 85)))
                 .rounding(Rounding::same(6.0));
             if ui.add(refresh_btn).clicked() {
                 let _ = self.event_tx.send(GuiEvent::RefreshHistory);
-                self.state.set_toast("History records refreshed!");
+                self.state.set_toast(tr(lang, "History records refreshed!"));
             }
         });
 
@@ -2299,7 +2648,7 @@ impl WisprFlowGui {
             ui.add_space(45.0);
             ui.vertical_centered(|ui| {
                 ui.label(
-                    egui::RichText::new("No matching dictation records found.")
+                    egui::RichText::new(tr(lang, "No matching dictation records found."))
                         .font(FontId::proportional(14.0))
                         .color(Color32::from_rgb(148, 163, 184)),
                 );
@@ -2315,7 +2664,7 @@ impl WisprFlowGui {
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 let app_name = if rec.app.is_empty() {
-                                    "Desktop".to_string()
+                                    tr(lang, "Desktop").to_string()
                                 } else {
                                     rec.app.clone()
                                 };
@@ -2345,7 +2694,7 @@ impl WisprFlowGui {
 
                                 if !rec.timestamp.is_empty() {
                                     ui.label(
-                                        egui::RichText::new(&rec.timestamp)
+                                        egui::RichText::new(friendly_timestamp(&rec.timestamp))
                                             .font(FontId::proportional(11.0))
                                             .color(Color32::from_rgb(100, 116, 139)),
                                     );
@@ -2361,29 +2710,33 @@ impl WisprFlowGui {
                                             let _ = self.event_tx.send(GuiEvent::DeleteHistory(
                                                 rec.transcript_id.clone(),
                                             ));
-                                            self.state.set_toast("Record deleted");
+                                            self.state.set_toast(tr(lang, "Record deleted"));
                                         }
 
                                         ui.add_space(4.0);
 
-                                        let paste_btn = egui::Button::new("✍️ Paste")
-                                            .fill(Color32::from_rgb(49, 46, 129))
-                                            .rounding(Rounding::same(4.0));
+                                        let paste_btn =
+                                            egui::Button::new(format!("✍️ {}", tr(lang, "Paste")))
+                                                .fill(Color32::from_rgb(49, 46, 129))
+                                                .rounding(Rounding::same(4.0));
                                         if ui.add(paste_btn).clicked() {
                                             let _ =
                                                 PlatformManager::paste_text(&rec.formatted_text);
-                                            self.state.set_toast("Pasted into active window!");
+                                            self.state
+                                                .set_toast(tr(lang, "Pasted into active window!"));
                                         }
 
                                         ui.add_space(4.0);
 
-                                        let copy_btn = egui::Button::new("📋 Copy")
-                                            .fill(Color32::from_rgb(33, 44, 66))
-                                            .rounding(Rounding::same(4.0));
+                                        let copy_btn =
+                                            egui::Button::new(format!("📋 {}", tr(lang, "Copy")))
+                                                .fill(Color32::from_rgb(33, 44, 66))
+                                                .rounding(Rounding::same(4.0));
                                         if ui.add(copy_btn).clicked() {
                                             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                                 let _ = clipboard.set_text(&rec.formatted_text);
-                                                self.state.set_toast("Copied to clipboard!");
+                                                self.state
+                                                    .set_toast(tr(lang, "Copied to clipboard!"));
                                             }
                                         }
                                     },
@@ -2405,6 +2758,7 @@ impl WisprFlowGui {
     }
 
     fn render_dictionary_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.ui_lang;
         let entries = lock(&self.state.dictionary_entries).clone();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -2416,25 +2770,31 @@ impl WisprFlowGui {
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
                     ui.label(
-                        egui::RichText::new("📖  CUSTOM VOCABULARY & TEXT SNIPPET EXPANSIONS")
+                        egui::RichText::new(format!(
+                            "📖  {}",
+                            tr(lang, "CUSTOM VOCABULARY & TEXT SNIPPET EXPANSIONS")
+                        ))
                             .font(FontId::proportional(12.5))
                             .color(Color32::from_rgb(148, 163, 184))
                             .strong(),
                     );
                     ui.add_space(4.0);
                     ui.label(
-                        egui::RichText::new("Teach Wflow custom terminology, names, or define instant trigger snippets. When you speak a trigger phrase, it will automatically be expanded into your configured replacement text.")
+                        egui::RichText::new(tr(
+                            lang,
+                            "Teach Wflow custom terminology, names, or define instant trigger snippets. When you speak a trigger phrase, it will automatically be expanded into your configured replacement text.",
+                        ))
                             .font(FontId::proportional(11.0))
                             .color(Color32::from_rgb(148, 163, 184)),
                     );
                     ui.add_space(12.0);
 
-                    ui.horizontal(|ui| {
+                    ui.horizontal_top(|ui| {
                         ui.vertical(|ui| {
-                            ui.label("Word or Trigger Phrase:");
+                            ui.label(tr(lang, "Word or Trigger Phrase:"));
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.dict_word_input)
-                                    .hint_text("e.g. Wflow, myemail, BRB, หมอพร้อม")
+                                    .hint_text(tr(lang, "e.g. Wflow, myemail, BRB, หมอพร้อม"))
                                     .desired_width(240.0),
                             );
                         });
@@ -2442,10 +2802,13 @@ impl WisprFlowGui {
                         ui.add_space(8.0);
 
                         ui.vertical(|ui| {
-                            ui.label("Snippet Replacement (Optional):");
+                            ui.label(tr(lang, "Snippet Replacement (Optional):"));
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.dict_replacement_input)
-                                    .hint_text("e.g. contact@wflow.ai (leave blank for vocabulary only)")
+                                    .hint_text(tr(
+                                        lang,
+                                        "e.g. contact@wflow.ai (leave blank for vocabulary only)",
+                                    ))
                                     .desired_width(300.0),
                             );
                         });
@@ -2455,7 +2818,7 @@ impl WisprFlowGui {
                         ui.vertical(|ui| {
                             ui.label(" ");
                             let add_btn = egui::Button::new(
-                                egui::RichText::new("➕ Add Entry")
+                                egui::RichText::new(format!("➕ {}", tr(lang, "Add Entry")))
                                     .font(FontId::proportional(12.5))
                                     .color(Color32::WHITE)
                                     .strong(),
@@ -2479,7 +2842,7 @@ impl WisprFlowGui {
                                     });
                                     self.dict_word_input.clear();
                                     self.dict_replacement_input.clear();
-                                    self.state.set_toast(&format!("Added '{}' to dictionary", word));
+                                    self.state.set_toast(&tr1(lang, "Added '{}' to dictionary", &word));
                                 }
                             }
                         });
@@ -2491,14 +2854,18 @@ impl WisprFlowGui {
             // Filter & Entries List
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(format!("All Entries ({})", entries.len()))
-                        .font(FontId::proportional(13.0))
+                    egui::RichText::new(tr1(
+                        lang,
+                        "All Entries ({})",
+                        entries.len(),
+                    ))
+                        .font(heading(13.0))
                         .strong(),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.dict_search_query)
-                            .hint_text("🔍 Filter dictionary...")
+                            .hint_text(tr(lang, "🔍 Filter dictionary..."))
                             .desired_width(200.0),
                     );
                 });
@@ -2531,12 +2898,15 @@ impl WisprFlowGui {
                     .show(ui, |ui| {
                         ui.vertical_centered(|ui| {
                             ui.label(
-                                egui::RichText::new("No dictionary entries found.")
+                                egui::RichText::new(tr(lang, "No dictionary entries found."))
                                     .font(FontId::proportional(13.0))
                                     .color(Color32::from_rgb(148, 163, 184)),
                             );
                             ui.label(
-                                egui::RichText::new("Add custom words or text expansion snippets above!")
+                                egui::RichText::new(tr(
+                                    lang,
+                                    "Add custom words or text expansion snippets above!",
+                                ))
                                     .font(FontId::proportional(11.0))
                                     .color(Color32::from_rgb(100, 116, 139)),
                             );
@@ -2554,7 +2924,7 @@ impl WisprFlowGui {
                                 let is_snippet = entry.replacement.as_ref().map(|r| !r.trim().is_empty()).unwrap_or(false);
                                 if is_snippet {
                                     let badge = ui.label(
-                                        egui::RichText::new("⚡ SNIPPET")
+                                        egui::RichText::new(tr(lang, "SNIPPET"))
                                             .font(FontId::monospace(10.5))
                                             .color(Color32::from_rgb(192, 132, 252))
                                             .strong(),
@@ -2566,7 +2936,7 @@ impl WisprFlowGui {
                                     );
                                 } else {
                                     let badge = ui.label(
-                                        egui::RichText::new("📚 VOCAB")
+                                        egui::RichText::new(tr(lang, "VOCAB"))
                                             .font(FontId::monospace(10.5))
                                             .color(Color32::from_rgb(56, 189, 248))
                                             .strong(),
@@ -2590,7 +2960,7 @@ impl WisprFlowGui {
                                 if let Some(ref repl) = entry.replacement {
                                     if !repl.trim().is_empty() {
                                         ui.label(
-                                            egui::RichText::new("➔")
+                                            egui::RichText::new("→")
                                                 .font(FontId::proportional(12.0))
                                                 .color(Color32::from_rgb(148, 163, 184)),
                                         );
@@ -2603,12 +2973,12 @@ impl WisprFlowGui {
                                 }
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let del_btn = egui::Button::new("🗑️ Delete")
+                                    let del_btn = egui::Button::new(format!("🗑️ {}", tr(lang, "Delete")))
                                         .fill(Color32::from_rgb(45, 25, 30))
                                         .rounding(Rounding::same(4.0));
                                     if ui.add(del_btn).clicked() {
                                         let _ = self.event_tx.send(GuiEvent::DeleteDictionaryEntry(entry.id.clone()));
-                                        self.state.set_toast("Entry removed");
+                                        self.state.set_toast(tr(lang, "Entry removed"));
                                     }
                                 });
                             });
@@ -2622,11 +2992,13 @@ impl WisprFlowGui {
     }
 
     fn render_updates_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.ui_lang;
         let current = crate::update::current_version();
         let pending = self.pending_update();
         let running = self.state.update_check_running.load(Ordering::SeqCst);
         let error = lock(&self.state.update_error).clone();
         let last_check = lock(&self.state.config).last_update_check.clone();
+        let install_running = lock(&self.state.update_install).is_running();
 
         egui::Frame::none()
             .fill(Color32::from_rgb(17, 23, 36))
@@ -2636,7 +3008,10 @@ impl WisprFlowGui {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new("🔄  Wflow Software Update")
+                        egui::RichText::new(format!(
+                            "🔄  {}",
+                            tr(lang, "Wflow Software Update")
+                        ))
                             .font(FontId::proportional(14.0))
                             .color(Color32::WHITE)
                             .strong(),
@@ -2654,41 +3029,44 @@ impl WisprFlowGui {
                 // --- status line -------------------------------------------------
                 let (status_text, status_color, status_fill, status_stroke) = if running {
                     (
-                        "⏳ กำลังตรวจสอบอัปเดต...".to_string(),
+                        format!("⏳ {}", tr(lang, "Checking for updates...")),
                         Color32::from_rgb(203, 213, 225),
                         Color32::from_rgb(30, 41, 59),
                         Color32::from_rgb(71, 85, 105),
                     )
                 } else if let Some(info) = pending.as_ref() {
                     (
-                        format!("🎉 มีเวอร์ชันใหม่ v{}", info.latest),
+                        format!("🎉 {}", tr1(lang, "New version v{} available", &info.latest)),
                         Color32::WHITE,
                         Color32::from_rgb(22, 163, 74),
                         Color32::from_rgb(74, 222, 128),
                     )
                 } else if let Some(err) = error.as_ref() {
                     (
-                        format!("⚠️ ตรวจสอบไม่สำเร็จ: {}", err),
+                        format!("⚠️ {}", tr1(lang, "Update check failed: {}", err)),
                         Color32::from_rgb(252, 165, 165),
                         Color32::from_rgb(45, 18, 22),
                         Color32::from_rgb(239, 68, 68),
                     )
                 } else {
                     (
-                        "✅ เป็นเวอร์ชันล่าสุดแล้ว".to_string(),
+                        format!("✅ {}", tr(lang, "You are on the latest version")),
                         Color32::from_rgb(134, 239, 172),
                         Color32::from_rgb(12, 38, 28),
                         Color32::from_rgb(34, 197, 94),
                     )
                 };
 
-                let status_pill = ui.label(
-                    egui::RichText::new(shape_thai(&status_text))
-                        .font(FontId::proportional(13.0))
-                        .color(status_color)
-                        .strong(),
+                // Paint the background first, then the text on top of it;
+                // drawing the filled rect after the label hid the message.
+                let galley = ui.painter().layout_no_wrap(
+                    shape_thai(&status_text).to_string(),
+                    FontId::proportional(13.0),
+                    status_color,
                 );
-                let pill_rect = status_pill.rect.expand(8.0);
+                let pill_size = galley.size() + egui::vec2(22.0, 12.0);
+                let (pill_rect, _) =
+                    ui.allocate_exact_size(pill_size, egui::Sense::hover());
                 ui.painter()
                     .rect_filled(pill_rect, Rounding::same(10.0), status_fill);
                 ui.painter().rect_stroke(
@@ -2696,18 +3074,23 @@ impl WisprFlowGui {
                     Rounding::same(10.0),
                     Stroke::new(1.0_f32, status_stroke),
                 );
+                ui.painter().galley(
+                    pill_rect.center() - galley.size() / 2.0,
+                    galley,
+                    status_color,
+                );
 
                 ui.add_space(14.0);
 
                 // --- actions -----------------------------------------------------
                 ui.horizontal(|ui| {
                     let check_label = if running {
-                        "⏳ กำลังตรวจสอบ..."
+                        format!("⏳ {}", tr(lang, "Checking for updates..."))
                     } else {
-                        "🔍 ตรวจสอบอัปเดตเดี๋ยวนี้"
+                        format!("🔍 {}", tr(lang, "Check now"))
                     };
                     let check_btn = egui::Button::new(
-                        egui::RichText::new(shape_thai(check_label))
+                        egui::RichText::new(shape_thai(&check_label))
                             .font(FontId::proportional(12.5))
                             .color(Color32::WHITE)
                             .strong(),
@@ -2719,12 +3102,22 @@ impl WisprFlowGui {
 
                     if ui.add_enabled(!running, check_btn).clicked() {
                         let _ = self.event_tx.send(GuiEvent::CheckUpdate);
-                        self.state.set_toast("กำลังตรวจสอบอัปเดต...");
+                        self.state.set_toast(tr(lang, "Checking for updates..."));
                     }
 
                     if let Some(info) = pending.as_ref() {
-                        let dl_btn = egui::Button::new(
-                            egui::RichText::new(format!("⬇️ ดาวน์โหลด v{}", info.latest))
+                        // The primary action installs the update inside the
+                        // app: download → checksum → replace → restart.
+                        let install_label = if install_running {
+                            format!(
+                                "⏳ {}",
+                                tr1(lang, "Installing v{}...", &info.latest)
+                            )
+                        } else {
+                            format!("⬇️ {}", tr1(lang, "Install v{}", &info.latest))
+                        };
+                        let install_btn = egui::Button::new(
+                            egui::RichText::new(shape_thai(&install_label))
                                 .font(FontId::proportional(12.5))
                                 .color(Color32::WHITE)
                                 .strong(),
@@ -2732,18 +3125,19 @@ impl WisprFlowGui {
                         .fill(Color32::from_rgb(22, 163, 74))
                         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(74, 222, 128)))
                         .rounding(Rounding::same(8.0))
-                        .min_size(Vec2::new(170.0, 36.0));
+                        .min_size(Vec2::new(190.0, 36.0));
 
-                        if ui.add(dl_btn).clicked() {
-                            let _ = self
-                                .event_tx
-                                .send(GuiEvent::OpenUrl(info.download_url.clone()));
+                        if ui.add_enabled(!install_running, install_btn).clicked() {
+                            let _ = self.event_tx.send(GuiEvent::InstallUpdate);
                         }
                     }
 
                     if ui
-                        .button("🌐 เปิดหน้า Releases")
-                        .on_hover_text("เปิดหน้า GitHub Releases ในเบราว์เซอร์")
+                        .button(format!("🌐 {}", tr(lang, "Open Releases page")))
+                        .on_hover_text(tr(
+                            lang,
+                            "Open the GitHub Releases page in your browser",
+                        ))
                         .clicked()
                     {
                         let _ = self.event_tx.send(GuiEvent::OpenUrl(format!(
@@ -2752,6 +3146,54 @@ impl WisprFlowGui {
                         )));
                     }
                 });
+
+                // Manual download, for the rare case where the in-app
+                // installation is not possible (no archive for this platform).
+                if let Some(info) = pending.as_ref() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(format!("📥 {}", tr(lang, "Download manually")))
+                            .on_hover_text(tr(
+                                lang,
+                                "Download the installer and install it yourself",
+                            ))
+                            .clicked()
+                        {
+                            let _ = self
+                                .event_tx
+                                .send(GuiEvent::OpenUrl(info.download_url.clone()));
+                        }
+                    });
+                }
+
+                // --- progress of the running installation --------------------
+                let install_state = lock(&self.state.update_install).clone();
+                if install_state.is_running() {
+                    ui.add_space(10.0);
+                    let label = match install_state.stage {
+                        crate::updater::InstallStage::Downloading => {
+                            tr(lang, "Downloading update...")
+                        }
+                        crate::updater::InstallStage::Verifying => {
+                            tr(lang, "Verifying checksum...")
+                        }
+                        crate::updater::InstallStage::Installing => {
+                            tr(lang, "Installing update...")
+                        }
+                        crate::updater::InstallStage::Restarting => {
+                            tr(lang, "Restarting Wflow...")
+                        }
+                        _ => tr(lang, "Working..."),
+                    };
+                    ui.label(
+                        egui::RichText::new(shape_thai(label))
+                            .font(FontId::proportional(11.5))
+                            .color(Color32::from_rgb(148, 163, 184)),
+                    );
+                    ui.add(egui::ProgressBar::new(install_state.percent as f32 / 100.0)
+                        .desired_width(ui.available_width())
+                        .fill(Color32::from_rgb(34, 197, 94)));
+                }
 
                 ui.add_space(12.0);
 
@@ -2765,7 +3207,7 @@ impl WisprFlowGui {
                     );
                     ui.add_space(4.0);
                     let notes = if info.notes.trim().is_empty() {
-                        "(ไม่มีรายละเอียดเพิ่มเติม)".to_string()
+                        tr(lang, "(no further details)").to_string()
                     } else {
                         info.notes.clone()
                     };
@@ -2781,20 +3223,26 @@ impl WisprFlowGui {
 
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("📝 ดู Release Notes บน GitHub").clicked() {
+                        if ui
+                            .button(format!(
+                                "📝 {}",
+                                tr(lang, "View Release Notes on GitHub")
+                            ))
+                            .clicked()
+                        {
                             let _ = self
                                 .event_tx
                                 .send(GuiEvent::OpenUrl(info.release_url.clone()));
                         }
                         if ui
-                            .button("ข้ามเวอร์ชันนี้")
-                            .on_hover_text("ไม่แจ้งเตือนเวอร์ชันนี้อีก")
+                            .button(tr(lang, "Skip this version"))
+                            .on_hover_text(tr(lang, "Do not notify about this version again"))
                             .clicked()
                         {
                             let _ = self
                                 .event_tx
                                 .send(GuiEvent::SkipUpdateVersion(info.latest.to_string()));
-                            self.state.set_toast("ข้ามเวอร์ชันนี้แล้ว");
+                            self.state.set_toast(tr(lang, "Version skipped"));
                         }
                     });
                 }
@@ -2805,28 +3253,41 @@ impl WisprFlowGui {
 
                 // --- details ------------------------------------------------------
                 ui.label(
-                    egui::RichText::new("รายละเอียด")
+                    egui::RichText::new(tr(lang, "Details"))
                         .font(FontId::proportional(12.0))
                         .color(Color32::from_rgb(148, 163, 184))
                         .strong(),
                 );
                 ui.label(
-                    egui::RichText::new(format!("• เวอร์ชันปัจจุบัน: v{}", current))
+                    egui::RichText::new(format!(
+                        "• {}",
+                        tr1(lang, "Current version: v{}", current)
+                    ))
                         .font(FontId::proportional(11.5))
                         .color(Color32::from_rgb(203, 213, 225)),
                 );
                 ui.label(
                     egui::RichText::new(format!(
-                        "• ตรวจสอบล่าสุด: {}",
-                        last_check.unwrap_or_else(|| "ยังไม่เคยตรวจสอบ".to_string())
+                        "• {}",
+                        tr1(
+                            lang,
+                            "Last checked: {}",
+                            last_check
+                                .map(|v| friendly_timestamp(&v))
+                                .unwrap_or_else(|| tr(lang, "never").to_string())
+                        )
                     ))
                     .font(FontId::proportional(11.5))
                     .color(Color32::from_rgb(203, 213, 225)),
                 );
                 ui.label(
-                    egui::RichText::new(
-                        "• ตรวจสอบอัตโนมัติทุก 15 นาที และเมื่อเปิดโปรแกรม (ตั้งค่าได้ใน Settings)",
-                    )
+                    egui::RichText::new(format!(
+                        "• {}",
+                        tr(
+                            lang,
+                            "Checked automatically every 15 minutes and at startup (configurable in Settings)",
+                        )
+                    ))
                     .font(FontId::proportional(11.5))
                     .color(Color32::from_rgb(203, 213, 225)),
                 );
@@ -2834,11 +3295,13 @@ impl WisprFlowGui {
     }
 
     fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.ui_lang;
         // A compact section switcher keeps the settings readable: instead of
         // one very long page, every topic gets its own short page.
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             for (section, icon, label) in [
+                (SettingsSection::Language, "🌐", "Language"),
                 (SettingsSection::Shortcuts, "⌨️", "Shortcuts"),
                 (SettingsSection::Audio, "🎙️", "Audio"),
                 (SettingsSection::Ai, "🤖", "AI & Models"),
@@ -2847,7 +3310,7 @@ impl WisprFlowGui {
                 (SettingsSection::Updates, "🔄", "Updates"),
             ] {
                 let selected = self.settings_section == section;
-                let text = egui::RichText::new(format!("{} {}", icon, label))
+                let text = egui::RichText::new(format!("{} {}", icon, tr(lang, label)))
                     .font(FontId::proportional(12.0))
                     .color(if selected {
                         Color32::WHITE
@@ -2882,6 +3345,7 @@ impl WisprFlowGui {
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             match self.settings_section {
+                SettingsSection::Language => self.render_settings_language(ui),
                 SettingsSection::Shortcuts => self.render_settings_shortcuts(ui),
                 SettingsSection::Audio => self.render_settings_audio(ui),
                 SettingsSection::Ai => self.render_settings_ai(ui),
@@ -2895,7 +3359,98 @@ impl WisprFlowGui {
         });
     }
 
+    /// Settings ▸ Language: switches the interface between Thai and English.
+    ///
+    /// The change applies instantly and is persisted right away, so the user
+    /// never has to find the save button in a language they cannot read.
+    fn render_settings_language(&mut self, ui: &mut egui::Ui) {
+        let lang = self.ui_lang;
+        ui.add_space(4.0);
+
+        egui::Frame::none()
+            .fill(Color32::from_rgb(17, 23, 36))
+            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
+            .rounding(Rounding::same(12.0))
+            .inner_margin(egui::Margin::same(16.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    egui::RichText::new(format!("🌐  {}", tr(lang, "INTERFACE LANGUAGE")))
+                        .font(heading(12.5))
+                        .color(Color32::from_rgb(148, 163, 184))
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(tr(
+                        lang,
+                        "Choose the language of the Wflow interface. The language used for speech transcription is configured separately under Audio.",
+                    ))
+                    .font(FontId::proportional(11.5))
+                    .color(Color32::from_rgb(148, 163, 184)),
+                );
+
+                ui.add_space(14.0);
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(10.0, 10.0);
+                    for choice in [Lang::Th, Lang::En] {
+                        let selected = self.settings_ui_language == choice.code();
+                        let fill = if selected {
+                            Color32::from_rgb(55, 48, 163)
+                        } else {
+                            Color32::from_rgb(22, 29, 44)
+                        };
+                        let stroke = if selected {
+                            Color32::from_rgb(129, 140, 248)
+                        } else {
+                            Color32::from_rgb(51, 65, 85)
+                        };
+
+                        let response = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(format!(
+                                    "{}  {}",
+                                    if selected { "●" } else { "○" },
+                                    choice.native_name()
+                                ))
+                                .font(heading(14.0))
+                                .color(Color32::WHITE),
+                            )
+                            .fill(fill)
+                            .stroke(Stroke::new(1.4_f32, stroke))
+                            .rounding(Rounding::same(10.0))
+                            .min_size(Vec2::new(170.0, 46.0)),
+                        );
+
+                        if response.clicked() && !selected {
+                            self.settings_ui_language = choice.code().to_string();
+                            self.ui_lang = choice;
+                            // Persist immediately: the rest of the settings
+                            // page is now in a different language.
+                            let _ = self
+                                .event_tx
+                                .send(GuiEvent::SetUiLanguage(choice.code().to_string()));
+                        }
+                    }
+                });
+
+                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new(tr(
+                        lang,
+                        "The interface language only affects labels and messages. Your dictation hotkeys, history and vocabulary are unchanged.",
+                    ))
+                    .font(FontId::proportional(11.0))
+                    .color(Color32::from_rgb(100, 116, 139)),
+                );
+            });
+
+        ui.add_space(12.0);
+    }
+
     fn render_settings_shortcuts(&mut self, ui: &mut egui::Ui) {
+        let lang = self.ui_lang;
         ui.add_space(4.0);
         // CARD 1: Hotkeys & Trigger Preferences
         egui::Frame::none()
@@ -2904,8 +3459,12 @@ impl WisprFlowGui {
                 .rounding(Rounding::same(12.0))
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.label(
-                        egui::RichText::new("⌨️  GLOBAL KEYBOARD SHORTCUTS")
+                        egui::RichText::new(format!(
+                            "⌨️  {}",
+                            tr(lang, "GLOBAL KEYBOARD SHORTCUTS")
+                        ))
                             .font(FontId::proportional(12.5))
                             .color(Color32::from_rgb(148, 163, 184))
                             .strong(),
@@ -2916,8 +3475,11 @@ impl WisprFlowGui {
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new("🎙️ Push-To-Talk Dictation Hotkey:")
-                                    .font(FontId::proportional(13.0))
+                                egui::RichText::new(format!(
+                                    "🎙️ {}",
+                                    tr(lang, "Push-To-Talk Dictation Hotkey:")
+                                ))
+                                    .font(heading(13.0))
                                     .strong(),
                             );
                             let curr_name = self.settings_hotkey.format_display();
@@ -2935,14 +3497,21 @@ impl WisprFlowGui {
                         });
                         ui.add_space(3.0);
                         ui.label(
-                            egui::RichText::new("Hold this key or combination anywhere in Windows to record voice, release to insert text.")
+                            egui::RichText::new(tr(
+                                    lang,
+                                    "Hold this key or combination to record voice, release to insert text.",
+                                ))
                                 .font(FontId::proportional(11.0))
                                 .color(Color32::from_rgb(148, 163, 184)),
                         );
                         ui.add_space(6.0);
 
                         ui.horizontal(|ui| {
-                            let curr_label = format!("Preset: {}", self.settings_hotkey.format_display());
+                            let curr_label = tr1(
+                                lang,
+                                "Preset: {}",
+                                self.settings_hotkey.format_display(),
+                            );
                             egui::ComboBox::from_id_salt("hotkey_combo")
                                 .selected_text(curr_label)
                                 .show_ui(ui, |ui| {
@@ -2955,9 +3524,15 @@ impl WisprFlowGui {
 
                             let is_rec = self.recording_mode == Some(1);
                             let rec_text = if is_rec {
-                                "🔴 Listening for shortcut combination... (Esc to cancel)"
+                                format!(
+                                    "🔴 {}",
+                                    tr(lang, "Listening for shortcut combination... (Esc to cancel)")
+                                )
                             } else {
-                                "⌨️ Press any key or combination to set"
+                                format!(
+                                    "⌨️ {}",
+                                    tr(lang, "Press any key or combination to set")
+                                )
                             };
                             let rec_fill = if is_rec {
                                 Color32::from_rgb(225, 29, 72)
@@ -2977,11 +3552,15 @@ impl WisprFlowGui {
                                 if is_rec {
                                     self.recording_mode = None;
                                     PlatformManager::stop_recording_hotkey();
-                                    self.state.set_toast("Key recording cancelled");
+                                    self.state
+                                        .set_toast(tr(lang, "Key recording cancelled"));
                                 } else {
                                     self.recording_mode = Some(1);
                                     PlatformManager::start_recording_hotkey(1);
-                                    self.state.set_toast("Press any combination (e.g. Ctrl+Space, Alt+Space, Ctrl+Shift+D) to set");
+                                    self.state.set_toast(tr(
+                                        lang,
+                                        "Press any combination (e.g. Ctrl+Space, Alt+Space, Ctrl+Shift+D) to set",
+                                    ));
                                 }
                             }
                         });
@@ -2993,8 +3572,11 @@ impl WisprFlowGui {
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new("🪟 Toggle Window Hotkey:")
-                                    .font(FontId::proportional(13.0))
+                                egui::RichText::new(format!(
+                                    "🪟 {}",
+                                    tr(lang, "Toggle Window Hotkey:")
+                                ))
+                                    .font(heading(13.0))
                                     .strong(),
                             );
                             let curr_name = self.settings_toggle.format_display();
@@ -3012,14 +3594,21 @@ impl WisprFlowGui {
                         });
                         ui.add_space(3.0);
                         ui.label(
-                            egui::RichText::new("Press this key or combination anywhere to toggle Wflow Studio between screen and system tray.")
+                            egui::RichText::new(tr(
+                                    lang,
+                                    "Press this key or combination anywhere to toggle Wflow Studio between screen and system tray.",
+                                ))
                                 .font(FontId::proportional(11.0))
                                 .color(Color32::from_rgb(148, 163, 184)),
                         );
                         ui.add_space(6.0);
 
                         ui.horizontal(|ui| {
-                            let curr_label = format!("Preset: {}", self.settings_toggle.format_display());
+                            let curr_label = tr1(
+                                lang,
+                                "Preset: {}",
+                                self.settings_toggle.format_display(),
+                            );
                             egui::ComboBox::from_id_salt("toggle_combo")
                                 .selected_text(curr_label)
                                 .show_ui(ui, |ui| {
@@ -3032,9 +3621,15 @@ impl WisprFlowGui {
 
                             let is_rec = self.recording_mode == Some(2);
                             let rec_text = if is_rec {
-                                "🔴 Listening for shortcut combination... (Esc to cancel)"
+                                format!(
+                                    "🔴 {}",
+                                    tr(lang, "Listening for shortcut combination... (Esc to cancel)")
+                                )
                             } else {
-                                "⌨️ Press any key or combination to set"
+                                format!(
+                                    "⌨️ {}",
+                                    tr(lang, "Press any key or combination to set")
+                                )
                             };
                             let rec_fill = if is_rec {
                                 Color32::from_rgb(225, 29, 72)
@@ -3058,7 +3653,10 @@ impl WisprFlowGui {
                                 } else {
                                     self.recording_mode = Some(2);
                                     PlatformManager::start_recording_hotkey(2);
-                                    self.state.set_toast("Press any combination (e.g. Alt+Space, Ctrl+Space, F9) to set");
+                                    self.state.set_toast(tr(
+                                        lang,
+                                        "Press any combination (e.g. Alt+Space, Ctrl+Space, F9) to set",
+                                    ));
                                 }
                             }
                         });
@@ -3070,14 +3668,17 @@ impl WisprFlowGui {
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new("🎙️ Dictation Trigger Mode:")
-                                    .font(FontId::proportional(13.0))
+                                egui::RichText::new(format!(
+                                    "🎙️ {}",
+                                    tr(lang, "Dictation Trigger Mode:")
+                                ))
+                                    .font(heading(13.0))
                                     .strong(),
                             );
                             let mode_label = if self.settings_recording_trigger_mode == "tap_to_toggle" {
-                                "Tap to Toggle (Hands-Free)"
+                                tr(lang, "Tap to Toggle (Hands-Free)")
                             } else {
-                                "Push-to-Talk (Hold Key)"
+                                tr(lang, "Push-to-Talk (Hold Key)")
                             };
                             let badge = ui.label(
                                 egui::RichText::new(format!(" {} ", mode_label))
@@ -3096,19 +3697,28 @@ impl WisprFlowGui {
                             ui.selectable_value(
                                 &mut self.settings_recording_trigger_mode,
                                 "push_to_talk".to_string(),
-                                "🖐️ Hold key to talk (Push-to-Talk)",
+                                format!("🖐️ {}", tr(lang, "Hold key to talk (Push-to-Talk)")),
                             );
                             ui.selectable_value(
                                 &mut self.settings_recording_trigger_mode,
                                 "tap_to_toggle".to_string(),
-                                "🔄 Tap once to start / tap to stop (Hands-Free)",
+                                format!(
+                                    "🔄 {}",
+                                    tr(lang, "Tap once to start / tap to stop (Hands-Free)")
+                                ),
                             );
                         });
                         ui.label(
                             egui::RichText::new(if self.settings_recording_trigger_mode == "tap_to_toggle" {
-                                "Tap your hotkey once to start dictating freely. Tap again to stop and automatically paste into your active window."
+                                tr(
+                                    lang,
+                                    "Tap your hotkey once to start dictating freely. Tap again to stop and automatically paste into your active window.",
+                                )
                             } else {
-                                "Hold down your hotkey while speaking. Releasing the key immediately commits and types the text."
+                                tr(
+                                    lang,
+                                    "Hold down your hotkey while speaking. Releasing the key immediately commits and types the text.",
+                                )
                             })
                             .font(FontId::proportional(11.0))
                             .color(Color32::from_rgb(148, 163, 184)),
@@ -3120,7 +3730,10 @@ impl WisprFlowGui {
                     // Auto Paste Checkbox
                     ui.checkbox(
                         &mut self.settings_auto_paste,
-                        "Auto-paste transcribed text directly into active cursor position",
+                        tr(
+                            lang,
+                            "Auto-paste transcribed text directly into active cursor position",
+                        ),
                     );
 
                     ui.add_space(8.0);
@@ -3128,7 +3741,10 @@ impl WisprFlowGui {
                     // Auto Start Checkbox
                     let cb = ui.checkbox(
                         &mut self.settings_auto_start,
-                        "Start Wflow automatically on system startup (Run on Startup)",
+                        tr(
+                            lang,
+                            "Start Wflow automatically on system startup (Run on Startup)",
+                        ),
                     );
                     if cb.changed() {
                         let _ = PlatformManager::set_autostart(self.settings_auto_start);
@@ -3137,14 +3753,17 @@ impl WisprFlowGui {
                             let _ = lock.save(None);
                         }
                         let msg = if self.settings_auto_start {
-                            "Auto-start on Windows startup enabled"
+                            tr(lang, "Auto-start on system startup enabled")
                         } else {
-                            "Auto-start on Windows startup disabled"
+                            tr(lang, "Auto-start on system startup disabled")
                         };
                         self.state.set_toast(msg);
                     }
                     ui.label(
-                        egui::RichText::new("  └ Launches Wflow automatically when your system boots.")
+                        egui::RichText::new(format!(
+                        "  └ {}",
+                        tr(lang, "Launches Wflow automatically when your system boots.")
+                    ))
                             .font(FontId::proportional(11.0))
                             .color(Color32::from_rgb(148, 163, 184)),
                     );
@@ -3154,10 +3773,13 @@ impl WisprFlowGui {
                     // Close to Tray Checkbox
                     ui.checkbox(
                         &mut self.settings_close_to_tray,
-                        shape_thai("ย่อลง System Tray เมื่อกดปุ่ม [X] (Minimize to tray on close)"),
+                        shape_thai(tr(lang, "Minimize to tray on close")),
                     );
                     ui.label(
-                        egui::RichText::new(shape_thai("  └ หากไม่เลือก จะแสดงหน้าต่างยืนยันการปิดโปรแกรมเมื่อกดปุ่ม [X]"))
+                        egui::RichText::new(shape_thai(&format!(
+                        "  └ {}",
+                        tr(lang, "If unchecked, a confirmation dialog appears when you press [X].")
+                    )))
                             .font(FontId::proportional(11.0))
                             .color(Color32::from_rgb(148, 163, 184)),
                     );
@@ -3165,6 +3787,7 @@ impl WisprFlowGui {
     }
 
     fn render_settings_audio(&mut self, ui: &mut egui::Ui) {
+        let lang = self.ui_lang;
         ui.add_space(4.0);
         // CARD 1.5: Microphone & Sound Effects Hardware
         egui::Frame::none()
@@ -3173,8 +3796,12 @@ impl WisprFlowGui {
                 .rounding(Rounding::same(12.0))
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.label(
-                        egui::RichText::new("🎤  MICROPHONE HARDWARE & AUDIO SOUND EFFECTS")
+                        egui::RichText::new(format!(
+                            "🎤  {}",
+                            tr(lang, "MICROPHONE HARDWARE & AUDIO SOUND EFFECTS")
+                        ))
                             .font(FontId::proportional(12.5))
                             .color(Color32::from_rgb(148, 163, 184))
                             .strong(),
@@ -3183,17 +3810,23 @@ impl WisprFlowGui {
 
                     // Microphone Device Selector
                     ui.horizontal(|ui| {
-                        ui.label("Input Microphone:");
+                        ui.label(tr(lang, "Input Microphone:"));
                         let current_dev_label = self
                             .settings_input_device_name
                             .as_deref()
-                            .unwrap_or("Default System Microphone");
+                            .unwrap_or(tr(lang, "Default System Microphone"));
 
                         egui::ComboBox::from_id_salt("mic_device_combo")
                             .selected_text(current_dev_label)
                             .width(340.0)
                             .show_ui(ui, |ui| {
-                                if ui.selectable_label(self.settings_input_device_name.is_none(), "Default System Microphone").clicked() {
+                                if ui
+                                    .selectable_label(
+                                        self.settings_input_device_name.is_none(),
+                                        tr(lang, "Default System Microphone"),
+                                    )
+                                    .clicked()
+                                {
                                     self.settings_input_device_name = None;
                                 }
                                 for dev in &self.available_devices {
@@ -3204,9 +3837,12 @@ impl WisprFlowGui {
                                 }
                             });
 
-                        if ui.button("🔄 Refresh Devices").clicked() {
+                        if ui
+                            .button(format!("🔄 {}", tr(lang, "Refresh Devices")))
+                            .clicked()
+                        {
                             self.available_devices = crate::audio::list_input_devices();
-                            self.state.set_toast("Audio input devices refreshed");
+                            self.state.set_toast(tr(lang, "Audio input devices refreshed"));
                         }
                     });
 
@@ -3216,14 +3852,17 @@ impl WisprFlowGui {
                     ui.horizontal(|ui| {
                         let se_cb = ui.checkbox(
                             &mut self.settings_sound_effects,
-                            "Enable Synthesized Audio Earcons (Start/Finish/Error sound effects)",
+                            tr(
+                                lang,
+                                "Enable Synthesized Audio Earcons (Start/Finish/Error sound effects)",
+                            ),
                         );
                         if se_cb.changed() {
                             crate::sound::set_sound_enabled(self.settings_sound_effects);
                         }
 
                         ui.add_space(8.0);
-                        let test_sound_btn = egui::Button::new("🔊 Test Chime")
+                        let test_sound_btn = egui::Button::new(format!("🔊 {}", tr(lang, "Test Chime")))
                             .fill(Color32::from_rgb(45, 58, 86))
                             .rounding(Rounding::same(6.0));
                         if ui.add(test_sound_btn).clicked() {
@@ -3231,7 +3870,13 @@ impl WisprFlowGui {
                         }
                     });
                     ui.label(
-                        egui::RichText::new("  └ Soft pure-Rust synthesized harmonic chimes provide immediate tactile feedback when dictation starts and finishes.")
+                        egui::RichText::new(format!(
+                            "  └ {}",
+                            tr(
+                                lang,
+                                "Soft pure-Rust synthesized harmonic chimes provide immediate tactile feedback when dictation starts and finishes.",
+                            )
+                        ))
                             .font(FontId::proportional(11.0))
                             .color(Color32::from_rgb(148, 163, 184)),
                     );
@@ -3244,8 +3889,12 @@ impl WisprFlowGui {
                 .rounding(Rounding::same(12.0))
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.label(
-                        egui::RichText::new("🌐  LANGUAGE & FLOATING OVERLAY HUD")
+                        egui::RichText::new(format!(
+                            "🌐  {}",
+                            tr(lang, "LANGUAGE & FLOATING OVERLAY HUD")
+                        ))
                             .font(FontId::proportional(12.5))
                             .color(Color32::from_rgb(148, 163, 184))
                             .strong(),
@@ -3254,7 +3903,7 @@ impl WisprFlowGui {
 
                     // Language Selector
                     ui.horizontal(|ui| {
-                        ui.label("Transcription Language:");
+                        ui.label(tr(lang, "Transcription Language:"));
                         let current_label = LANGUAGE_OPTIONS
                             .iter()
                             .find(|(_, code)| *code == self.settings_language)
@@ -3277,10 +3926,19 @@ impl WisprFlowGui {
                     // Floating HUD Checkbox
                     ui.checkbox(
                         &mut self.settings_show_floating_hud,
-                        "Show floating recording symbol & live waveform HUD (overlay)",
+                        tr(
+                            lang,
+                            "Show floating recording symbol & live waveform HUD (overlay)",
+                        ),
                     );
                     ui.label(
-                        egui::RichText::new("  └ Displays an on-screen pill indicator with animated audio waveform bars when dictating without stealing focus.")
+                        egui::RichText::new(format!(
+                            "  └ {}",
+                            tr(
+                                lang,
+                                "Displays an on-screen pill indicator with animated audio waveform bars when dictating without stealing focus.",
+                            )
+                        ))
                             .font(FontId::proportional(11.0))
                             .color(Color32::from_rgb(148, 163, 184)),
                     );
@@ -3288,6 +3946,7 @@ impl WisprFlowGui {
     }
 
     fn render_settings_ai(&mut self, ui: &mut egui::Ui) {
+        let lang = self.ui_lang;
         ui.add_space(4.0);
         // CARD 1.8: AI Post-Processing & Smart Formatting
         egui::Frame::none()
@@ -3296,8 +3955,12 @@ impl WisprFlowGui {
                 .rounding(Rounding::same(12.0))
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.label(
-                        egui::RichText::new("✨  AI POST-PROCESSING & SMART FORMATTING")
+                        egui::RichText::new(format!(
+                            "✨  {}",
+                            tr(lang, "AI POST-PROCESSING & SMART FORMATTING")
+                        ))
                             .font(FontId::proportional(12.5))
                             .color(Color32::from_rgb(148, 163, 184))
                             .strong(),
@@ -3306,10 +3969,19 @@ impl WisprFlowGui {
 
                     ui.checkbox(
                         &mut self.settings_ai_formatting,
-                        "Enable Instant AI Text Formatting & Cleanup (Groq Llama 3.1 8B ~150ms)",
+                        tr(
+                            lang,
+                            "Enable Instant AI Text Formatting & Cleanup (Groq Llama 3.1 8B ~150ms)",
+                        ),
                     );
                     ui.label(
-                        egui::RichText::new("  └ Automatically cleans speech disfluencies, filler words (um, uh, อ่า, แบบว่า), fixes punctuation, and adapts writing tone.")
+                        egui::RichText::new(format!(
+                        "  └ {}",
+                        tr(
+                            lang,
+                            "Automatically cleans speech disfluencies, filler words (um, uh, อ่า, แบบว่า), fixes punctuation, and adapts writing tone.",
+                        )
+                    ))
                             .font(FontId::proportional(11.0))
                             .color(Color32::from_rgb(148, 163, 184)),
                     );
@@ -3317,13 +3989,13 @@ impl WisprFlowGui {
                     if self.settings_ai_formatting {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            ui.label("Writing Style Tone:");
+                            ui.label(tr(lang, "Writing Style Tone:"));
                             let style_label = match self.settings_writing_style.as_str() {
-                                "smart_cleanup" => "Smart Cleanup (Removes stutters, filler words, fixes punctuation)",
-                                "casual" => "Casual & Friendly (Chat and messaging tone)",
-                                "professional" => "Professional & Executive (Polite corporate emails & reports)",
-                                "code" => "Code & CLI Commands (Converts speech to code / terminal syntax)",
-                                "bullet_points" => "Bullet Points (Summary in structured markdown bullets)",
+                                "smart_cleanup" => tr(lang, "Smart Cleanup (Removes stutters, filler words, fixes punctuation)"),
+                                "casual" => tr(lang, "Casual & Friendly (Chat and messaging tone)"),
+                                "professional" => tr(lang, "Professional & Executive (Polite corporate emails & reports)"),
+                                "code" => tr(lang, "Code & CLI Commands (Converts speech to code / terminal syntax)"),
+                                "bullet_points" => tr(lang, "Bullet Points (Summary in structured markdown bullets)"),
                                 other => other,
                             };
                             egui::ComboBox::from_id_salt("writing_style_combo")
@@ -3332,27 +4004,27 @@ impl WisprFlowGui {
                                     ui.selectable_value(
                                         &mut self.settings_writing_style,
                                         "smart_cleanup".to_string(),
-                                        "Smart Cleanup (Removes stutters, filler words, fixes punctuation) [Recommended]",
+                                        tr(lang, "Smart Cleanup (Removes stutters, filler words, fixes punctuation) [Recommended]"),
                                     );
                                     ui.selectable_value(
                                         &mut self.settings_writing_style,
                                         "casual".to_string(),
-                                        "Casual & Friendly (Chat and messaging tone)",
+                                        tr(lang, "Casual & Friendly (Chat and messaging tone)"),
                                     );
                                     ui.selectable_value(
                                         &mut self.settings_writing_style,
                                         "professional".to_string(),
-                                        "Professional & Executive (Polite corporate emails & reports)",
+                                        tr(lang, "Professional & Executive (Polite corporate emails & reports)"),
                                     );
                                     ui.selectable_value(
                                         &mut self.settings_writing_style,
                                         "code".to_string(),
-                                        "Code & CLI Commands (Converts speech to code / terminal syntax)",
+                                        tr(lang, "Code & CLI Commands (Converts speech to code / terminal syntax)"),
                                     );
                                     ui.selectable_value(
                                         &mut self.settings_writing_style,
                                         "bullet_points".to_string(),
-                                        "Bullet Points (Summary in structured markdown bullets)",
+                                        tr(lang, "Bullet Points (Summary in structured markdown bullets)"),
                                     );
                                 });
                         });
@@ -3366,8 +4038,12 @@ impl WisprFlowGui {
                 .rounding(Rounding::same(12.0))
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.label(
-                        egui::RichText::new("🤖  SPEECH-TO-TEXT (STT) AI SERVICE PROVIDER")
+                        egui::RichText::new(format!(
+                            "🤖  {}",
+                            tr(lang, "SPEECH-TO-TEXT (STT) AI SERVICE PROVIDER")
+                        ))
                             .font(FontId::proportional(12.5))
                             .color(Color32::from_rgb(148, 163, 184))
                             .strong(),
@@ -3378,7 +4054,7 @@ impl WisprFlowGui {
                     let groq_desc = format!("Model: {}", self.settings_groq_model);
                     let eleven_desc = format!("Model: {}", self.settings_elevenlabs_model);
                     let providers = [
-                        (SttProvider::WisprFlow, "⚡ Wispr Flow", "Native gRPC Protobuf streaming".to_string(), Color32::from_rgb(99, 102, 241)),
+                        (SttProvider::WisprFlow, "⚡ Wispr Flow", tr(lang, "Native gRPC Protobuf streaming").to_string(), Color32::from_rgb(99, 102, 241)),
                         (SttProvider::Groq, "🚀 Groq Whisper", groq_desc, Color32::from_rgb(249, 115, 22)),
                         (SttProvider::ElevenLabs, "🎙️ ElevenLabs", eleven_desc, Color32::from_rgb(168, 85, 247)),
                     ];
@@ -3395,6 +4071,7 @@ impl WisprFlowGui {
                                     .rounding(Rounding::same(8.0))
                                     .inner_margin(egui::Margin::same(10.0))
                                     .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
                                         let check = if is_sel { "🔘 " } else { "⚪ " };
                                         ui.horizontal(|ui| {
                                             ui.label(
@@ -3423,7 +4100,7 @@ impl WisprFlowGui {
 
                     match self.settings_stt_provider {
                         SttProvider::WisprFlow => {
-                            ui.label("API Endpoint URL:");
+                            ui.label(tr(lang, "API Endpoint URL:"));
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.settings_endpoint)
                                     .desired_width(ui.available_width()),
@@ -3431,16 +4108,19 @@ impl WisprFlowGui {
 
                             ui.add_space(8.0);
 
-                            ui.label("Bearer Auth Token (Optional / Session Token):");
+                            ui.label(tr(lang, "Bearer Auth Token (Optional / Session Token):"));
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.settings_token)
                                     .password(true)
-                                    .hint_text("Auto-detected from local Wispr Flow session if installed")
+                                    .hint_text(tr(
+                                        lang,
+                                        "Auto-detected from local Wispr Flow session if installed",
+                                    ))
                                     .desired_width(ui.available_width()),
                             );
 
                             ui.add_space(8.0);
-                            ui.label("Baseten Gateway API Key (optional, stored securely):");
+                            ui.label(tr(lang, "Baseten Gateway API Key (optional, stored securely):"));
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.settings_baseten_api_key)
                                     .password(true)
@@ -3448,13 +4128,17 @@ impl WisprFlowGui {
                                     .desired_width(ui.available_width()),
                             );
                             ui.label(
-                                egui::RichText::new(format!("Model ID: {}", self.settings_baseten_model))
+                                egui::RichText::new(tr1(
+                                    lang,
+                                    "Model ID: {}",
+                                    &self.settings_baseten_model,
+                                ))
                                     .font(FontId::proportional(11.0))
                                     .color(Color32::from_rgb(148, 163, 184)),
                             );
                         }
                         SttProvider::Groq => {
-                            ui.label("Groq Cloud API Key (get from console.groq.com):");
+                            ui.label(tr(lang, "Groq Cloud API Key (get from console.groq.com):"));
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.settings_groq_api_key)
                                     .password(true)
@@ -3463,7 +4147,7 @@ impl WisprFlowGui {
                             );
 
                             ui.add_space(8.0);
-                            ui.label("Groq Whisper Model:");
+                            ui.label(tr(lang, "Groq Whisper Model:"));
                             let groq_selected_label = match self.settings_groq_model.as_str() {
                                 "whisper-large-v3" => "whisper-large-v3 (Full accuracy, multilingual)",
                                 "whisper-large-v3-turbo" => "whisper-large-v3-turbo (Ultra-fast LPU, multilingual)",
@@ -3490,13 +4174,16 @@ impl WisprFlowGui {
                                     );
                                 });
                             ui.label(
-                                egui::RichText::new("⚡ Groq executes Whisper on LPUs with near-zero latency (~200ms per utterance).")
+                                egui::RichText::new(tr(
+                                    lang,
+                                    "Groq executes Whisper on LPUs with near-zero latency (~200ms per utterance).",
+                                ))
                                     .font(FontId::proportional(11.0))
                                     .color(Color32::from_rgb(148, 163, 184)),
                             );
                         }
                         SttProvider::ElevenLabs => {
-                            ui.label("ElevenLabs API Key (get from elevenlabs.io):");
+                            ui.label(tr(lang, "ElevenLabs API Key (get from elevenlabs.io):"));
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.settings_elevenlabs_api_key)
                                     .password(true)
@@ -3505,7 +4192,7 @@ impl WisprFlowGui {
                             );
 
                             ui.add_space(8.0);
-                            ui.label("ElevenLabs STT Model:");
+                            ui.label(tr(lang, "ElevenLabs STT Model:"));
                             let eleven_selected_label = match self.settings_elevenlabs_model.as_str() {
                                 "scribe_v1" => "scribe_v1 (State-of-the-art multilingual STT)",
                                 other => other,
@@ -3520,7 +4207,10 @@ impl WisprFlowGui {
                                     );
                                 });
                             ui.label(
-                                egui::RichText::new("🎙️ ElevenLabs Scribe STT provides unmatched speech recognition accuracy across languages.")
+                                egui::RichText::new(tr(
+                                    lang,
+                                    "ElevenLabs Scribe STT provides unmatched speech recognition accuracy across languages.",
+                                ))
                                     .font(FontId::proportional(11.0))
                                     .color(Color32::from_rgb(148, 163, 184)),
                             );
@@ -3534,12 +4224,12 @@ impl WisprFlowGui {
                     let in_progress = self.stt_test_in_progress.load(Ordering::SeqCst);
                     ui.horizontal(|ui| {
                         let btn_label = if in_progress {
-                            "⏳ กำลังทดสอบการเชื่อมต่อ STT..."
+                            format!("⏳ {}", tr(lang, "Testing the STT connection..."))
                         } else {
-                            "🧪 ทดสอบการเชื่อมต่อ STT (Test STT Provider)"
+                            format!("🧪 {}", tr(lang, "Test STT Provider"))
                         };
                         let test_btn = egui::Button::new(
-                            egui::RichText::new(shape_thai(btn_label))
+                            egui::RichText::new(shape_thai(&btn_label))
                                 .font(FontId::proportional(12.0))
                                 .color(Color32::WHITE)
                                 .strong(),
@@ -3570,6 +4260,7 @@ impl WisprFlowGui {
                                         .rounding(Rounding::same(6.0))
                                         .inner_margin(egui::Margin::symmetric(12.0, 8.0))
                                         .show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
                                             ui.label(
                                                 egui::RichText::new(shape_thai(&format!("✅ {}", msg)))
                                                     .font(FontId::proportional(12.0))
@@ -3584,6 +4275,7 @@ impl WisprFlowGui {
                                         .rounding(Rounding::same(6.0))
                                         .inner_margin(egui::Margin::symmetric(12.0, 8.0))
                                         .show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
                                             ui.label(
                                                 egui::RichText::new(shape_thai(&format!("❌ {}", err_msg)))
                                                     .font(FontId::proportional(12.0))
@@ -3598,6 +4290,7 @@ impl WisprFlowGui {
     }
 
     fn render_settings_voice(&mut self, ui: &mut egui::Ui) {
+        let lang = self.ui_lang;
         ui.add_space(4.0);
         // CARD 4: Voice filter & text quality
         egui::Frame::none()
@@ -3606,8 +4299,12 @@ impl WisprFlowGui {
                 .rounding(Rounding::same(12.0))
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.label(
-                        egui::RichText::new("🎚️  VOICE FILTER & TEXT QUALITY")
+                        egui::RichText::new(format!(
+                            "🎚️  {}",
+                            tr(lang, "VOICE FILTER & TEXT QUALITY")
+                        ))
                             .font(FontId::proportional(12.5))
                             .color(Color32::from_rgb(148, 163, 184))
                             .strong(),
@@ -3617,11 +4314,17 @@ impl WisprFlowGui {
                     // --- Silence filter -------------------------------------------------
                     ui.checkbox(
                         &mut self.settings_silence_filter,
-                        "กรองเสียงเงียบ (Silence filter / noise gate)",
+                        tr(lang, "Silence filter (noise gate)"),
                     );
                     ui.label(
                         egui::RichText::new(
-                            "  └ ตัดเสียงเงียบและเสียงรบกวนออกก่อนส่งให้โมเดล STT ลดการถอดผิดและประหยัดเน็ต",
+                            format!(
+                                "  └ {}",
+                                tr(
+                                    lang,
+                                    "Trims silence and background noise before audio reaches the STT model, reducing errors and saving bandwidth.",
+                                )
+                            ),
                         )
                         .font(FontId::proportional(11.0))
                         .color(Color32::from_rgb(148, 163, 184)),
@@ -3629,7 +4332,7 @@ impl WisprFlowGui {
 
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        ui.label("ความไวต่อเสียงพูด:");
+                        ui.label(tr(lang, "Speech sensitivity:"));
                         ui.add(
                             egui::DragValue::new(&mut self.settings_silence_sensitivity)
                                 .range(0.0..=1.0)
@@ -3638,11 +4341,11 @@ impl WisprFlowGui {
                         );
                         ui.label(
                             egui::RichText::new(if self.settings_silence_sensitivity > 0.66 {
-                                "ไวมาก"
+                                tr(lang, "Very sensitive")
                             } else if self.settings_silence_sensitivity > 0.33 {
-                                "ปกติ"
+                                tr(lang, "Normal")
                             } else {
-                                "ไวน้อย (เก็บเสียงพูดเบาๆ)"
+                                tr(lang, "Less sensitive (keeps quiet speech)")
                             })
                             .font(FontId::proportional(11.0))
                             .color(Color32::from_rgb(148, 163, 184)),
@@ -3651,16 +4354,16 @@ impl WisprFlowGui {
 
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        ui.label("หยุดอัตโนมัติเมื่อเงียบนาน:");
+                        ui.label(tr(lang, "Stop automatically after silence:"));
                         ui.add(
                             egui::DragValue::new(&mut self.settings_silence_stop_secs)
                                 .range(0..=600)
                                 .speed(1.0)
-                                .suffix(" วิ"),
+                                .suffix(tr(lang, " sec")),
                         );
                         if self.settings_silence_stop_secs == 0 {
                             ui.label(
-                                egui::RichText::new("(0 = ไม่หยุดอัตโนมัติ)")
+                                egui::RichText::new(tr(lang, "(0 = never stop automatically)"))
                                     .font(FontId::proportional(11.0))
                                     .color(Color32::from_rgb(148, 163, 184)),
                             );
@@ -3674,11 +4377,17 @@ impl WisprFlowGui {
                     // --- Hallucination guard ---------------------------------------------
                     ui.checkbox(
                         &mut self.settings_hallucination_guard,
-                        "กันโมเดลพิมพ์มั่ว (Hallucination guard)",
+                        tr(lang, "Hallucination guard"),
                     );
                     ui.label(
                         egui::RichText::new(
-                            "  └ ตรวจจับข้อความปลอมแปลงที่โมเดลมักแต่งขึ้นเอง เช่น \"Thank you.\" \"(upbeat music)\" หรือคำที่ซ้ำยาว ๆ แล้วไม่แทรกลงในแอป",
+                            format!(
+                                "  └ {}",
+                                tr(
+                                    lang,
+                                    "Detects invented text the model tends to add on its own, such as \"Thank you.\" or \"(upbeat music)\", and long repeated words, then drops it instead of typing it.",
+                                )
+                            ),
                         )
                         .font(FontId::proportional(11.0))
                         .color(Color32::from_rgb(148, 163, 184)),
@@ -3691,15 +4400,21 @@ impl WisprFlowGui {
                     // --- Spelling correction ---------------------------------------------
                     ui.checkbox(
                         &mut self.settings_autocorrect_enabled,
-                        "สะกดคำอัตโนมัติตามภาษา (Automatic spell check)",
+                        tr(lang, "Automatic spell check"),
                     );
                     ui.checkbox(
                         &mut self.settings_mixed_spacing,
-                        "เติมช่องว่างระหว่างคำไทยกับอังกฤษ (Mixed-language spacing)",
+                        tr(lang, "Mixed-language spacing"),
                     );
                     ui.label(
                         egui::RichText::new(
-                            "  └ เช่น \"ทดสอบAPI\" → \"ทดสอบ API\" และแก้คำพิมพ์ผิดที่พบบ่อยในแต่ละภาษา",
+                            format!(
+                                "  └ {}",
+                                tr(
+                                    lang,
+                                    "For example \"ทดสอบAPI\" → \"ทดสอบ API\". Also fixes common misspellings in each language.",
+                                )
+                            ),
                         )
                         .font(FontId::proportional(11.0))
                         .color(Color32::from_rgb(148, 163, 184)),
@@ -3708,19 +4423,22 @@ impl WisprFlowGui {
                     ui.add_space(6.0);
                     ui.checkbox(
                         &mut self.settings_autocorrect_use_llm,
-                        "ใช้โมเดลภาษาช่วยสะกดด้วย (ต้องมี Groq API key)",
+                        tr(lang, "Use a language model for spelling (requires a Groq API key)"),
                     );
 
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        ui.label("ภาษาที่ต้องการตรวจสะกด:");
+                        ui.label(tr(lang, "Languages to spell check:"));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.settings_autocorrect_languages)
                                 .desired_width(160.0)
-                                .hint_text("เช่น th,en"),
+                                .hint_text(tr(lang, "e.g. th,en")),
                         );
                         ui.label(
-                            egui::RichText::new("(เว้นว่าง = ตรวจอัตโนมัติตามภาษาของข้อความ)")
+                            egui::RichText::new(tr(
+                                lang,
+                                "(leave blank = detect from the text automatically)",
+                            ))
                                 .font(FontId::proportional(11.0))
                                 .color(Color32::from_rgb(148, 163, 184)),
                         );
@@ -3729,6 +4447,7 @@ impl WisprFlowGui {
     }
 
     fn render_settings_privacy(&mut self, ui: &mut egui::Ui) {
+        let lang = self.ui_lang;
         ui.add_space(4.0);
         // CARD 5: Privacy & Data
         egui::Frame::none()
@@ -3737,8 +4456,12 @@ impl WisprFlowGui {
                 .rounding(Rounding::same(12.0))
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.label(
-                        egui::RichText::new("🔒  PRIVACY & LOCAL DATA")
+                        egui::RichText::new(format!(
+                            "🔒  {}",
+                            tr(lang, "PRIVACY & LOCAL DATA")
+                        ))
                             .font(FontId::proportional(12.5))
                             .color(Color32::from_rgb(148, 163, 184))
                             .strong(),
@@ -3747,11 +4470,17 @@ impl WisprFlowGui {
 
                     ui.checkbox(
                         &mut self.settings_share_context,
-                        "ส่งข้อความรอบเคอร์เซอร์ไปยังผู้ให้บริการ STT (Share surrounding text context)",
+                        tr(lang, "Share surrounding text context with the STT provider"),
                     );
                     ui.label(
                         egui::RichText::new(
-                            "  └ ปิดเพื่อความเป็นส่วนตัวสูงสุด: จะไม่ส่ง before/after text หรือ selected text ขึ้น cloud (แนะนำเมื่อพิมพ์ข้อความลับ)",
+                            format!(
+                                "  └ {}",
+                                tr(
+                                    lang,
+                                    "Turn off for maximum privacy: before/after text and selected text are never uploaded (recommended for sensitive text).",
+                                )
+                            ),
                         )
                         .font(FontId::proportional(11.0))
                         .color(Color32::from_rgb(148, 163, 184)),
@@ -3760,12 +4489,12 @@ impl WisprFlowGui {
                     ui.add_space(6.0);
                     ui.checkbox(
                         &mut self.settings_store_textbox_contents,
-                        "เก็บเนื้อหาช่องข้อความไว้ในประวัติในเครื่อง (Store textbox contents in local history)",
+                        tr(lang, "Store textbox contents in the local history"),
                     );
 
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        ui.label("หมดเวลาคำขอ STT (วินาที):");
+                        ui.label(tr(lang, "STT request timeout (seconds):"));
                         ui.add(
                             egui::DragValue::new(&mut self.settings_stt_timeout_secs)
                                 .range(5..=300)
@@ -3776,7 +4505,7 @@ impl WisprFlowGui {
 
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        ui.label("บันทึกเสียงสูงสุดต่อครั้ง (วินาที):");
+                        ui.label(tr(lang, "Maximum recording length (seconds):"));
                         ui.add(
                             egui::DragValue::new(&mut self.settings_max_recording_secs)
                                 .range(10..=3600)
@@ -3785,7 +4514,13 @@ impl WisprFlowGui {
                         );
                     });
                     ui.label(
-                        egui::RichText::new("  └ ระบบจะหยุดบันทึกอัตโนมัติเมื่อถึงเวลานี้ เพื่อป้องกันหน่วยความจำเต็ม")
+                        egui::RichText::new(format!(
+                            "  └ {}",
+                            tr(
+                                lang,
+                                "Recording stops automatically at this limit to protect memory.",
+                            )
+                        ))
                             .font(FontId::proportional(11.0))
                             .color(Color32::from_rgb(148, 163, 184)),
                     );
@@ -3793,12 +4528,18 @@ impl WisprFlowGui {
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         let (label, fill) = if self.clear_history_armed {
-                            ("⚠️ กดอีกครั้งเพื่อล้างประวัติทั้งหมด", Color32::from_rgb(185, 28, 28))
+                            (
+                                format!("⚠️ {}", tr(lang, "Click again to clear all history")),
+                                Color32::from_rgb(185, 28, 28),
+                            )
                         } else {
-                            ("🗑️ ล้างประวัติการพูดทั้งหมด", Color32::from_rgb(51, 65, 85))
+                            (
+                                format!("🗑️ {}", tr(lang, "Clear all dictation history")),
+                                Color32::from_rgb(51, 65, 85),
+                            )
                         };
                         let clear_btn = egui::Button::new(
-                            egui::RichText::new(shape_thai(label))
+                            egui::RichText::new(shape_thai(&label))
                                 .font(FontId::proportional(12.0))
                                 .color(Color32::WHITE),
                         )
@@ -3811,19 +4552,23 @@ impl WisprFlowGui {
                                 let _ = self.event_tx.send(GuiEvent::ClearHistory);
                             } else {
                                 self.clear_history_armed = true;
-                                self.state.set_toast("กดปุ่มอีกครั้งเพื่อยืนยันการล้างประวัติ");
+                                self.state.set_toast(tr(
+                                    lang,
+                                    "Click the button again to confirm clearing history",
+                                ));
                             }
                         }
-                        if self.clear_history_armed && ui.button("ยกเลิก").clicked() {
+                        if self.clear_history_armed && ui.button(tr(lang, "Cancel")).clicked() {
                             self.clear_history_armed = false;
                         }
                     });
 
                     ui.add_space(6.0);
                     ui.label(
-                        egui::RichText::new(format!(
-                            "ข้อมูลถูกเก็บไว้ที่: {}",
-                            crate::paths::data_dir().display()
+                        egui::RichText::new(tr1(
+                            lang,
+                            "Data is stored in: {}",
+                            crate::paths::data_dir().display(),
                         ))
                         .font(FontId::proportional(10.5))
                         .color(Color32::from_rgb(100, 116, 139)),
@@ -3832,6 +4577,7 @@ impl WisprFlowGui {
     }
 
     fn render_settings_updates(&mut self, ui: &mut egui::Ui) {
+        let lang = self.ui_lang;
         ui.add_space(4.0);
         // CARD 5: Updates & Diagnostics
         egui::Frame::none()
@@ -3840,11 +4586,15 @@ impl WisprFlowGui {
             .rounding(Rounding::same(12.0))
             .inner_margin(egui::Margin::same(16.0))
             .show(ui, |ui| {
+                ui.set_width(ui.available_width());
                 ui.label(
-                    egui::RichText::new("🔄  SOFTWARE UPDATES & DIAGNOSTICS")
-                        .font(FontId::proportional(12.5))
-                        .color(Color32::from_rgb(148, 163, 184))
-                        .strong(),
+                    egui::RichText::new(format!(
+                        "🔄  {}",
+                        tr(lang, "SOFTWARE UPDATES & DIAGNOSTICS")
+                    ))
+                    .font(FontId::proportional(12.5))
+                    .color(Color32::from_rgb(148, 163, 184))
+                    .strong(),
                 );
                 ui.add_space(10.0);
 
@@ -3856,33 +4606,42 @@ impl WisprFlowGui {
                             .strong(),
                     );
                     ui.label(
-                        egui::RichText::new("• ตรวจสอบจาก GitHub Releases")
-                            .font(FontId::proportional(11.0))
-                            .color(Color32::from_rgb(148, 163, 184)),
+                        egui::RichText::new(format!(
+                            "• {}",
+                            tr(lang, "Checked against GitHub Releases")
+                        ))
+                        .font(FontId::proportional(11.0))
+                        .color(Color32::from_rgb(148, 163, 184)),
                     );
                 });
 
                 ui.add_space(8.0);
                 ui.checkbox(
                     &mut self.settings_check_updates,
-                    "ตรวจสอบอัปเดตอัตโนมัติเมื่อเริ่มโปรแกรม",
+                    tr(lang, "Check for updates automatically at startup"),
                 );
                 ui.checkbox(
                     &mut self.settings_include_prerelease,
-                    "รวมเวอร์ชันทดลอง (pre-release)",
+                    tr(lang, "Include pre-release versions"),
                 );
                 ui.label(
-                    egui::RichText::new("  └ การเปลี่ยนแปลงในหน้านี้จะมีผลหลังกด Save All Preferences")
-                        .font(FontId::proportional(10.5))
-                        .color(Color32::from_rgb(100, 116, 139)),
+                    egui::RichText::new(format!(
+                        "  └ {}",
+                        tr(
+                            lang,
+                            "Changes on this page apply after pressing Save All Preferences"
+                        )
+                    ))
+                    .font(FontId::proportional(10.5))
+                    .color(Color32::from_rgb(100, 116, 139)),
                 );
                 ui.horizontal(|ui| {
-                    ui.label("ตรวจสอบทุก ๆ:");
+                    ui.label(tr(lang, "Check every:"));
                     ui.add(
                         egui::DragValue::new(&mut self.settings_update_interval_hours)
                             .range(1..=720)
                             .speed(1.0)
-                            .suffix(" ชั่วโมง"),
+                            .suffix(tr(lang, " hours")),
                     );
                 });
 
@@ -3890,10 +4649,10 @@ impl WisprFlowGui {
                 let running = self.state.update_check_running.load(Ordering::SeqCst);
                 ui.horizontal(|ui| {
                     let check_btn = egui::Button::new(
-                        egui::RichText::new(shape_thai(if running {
-                            "⏳ กำลังตรวจสอบ..."
+                        egui::RichText::new(shape_thai(&if running {
+                            format!("⏳ {}", tr(lang, "Checking for updates..."))
                         } else {
-                            "🔍 ตรวจสอบอัปเดตเดี๋ยวนี้"
+                            format!("🔍 {}", tr(lang, "Check now"))
                         }))
                         .font(FontId::proportional(12.0))
                         .color(Color32::WHITE)
@@ -3905,13 +4664,19 @@ impl WisprFlowGui {
                     if ui.add_enabled(!running, check_btn).clicked() {
                         let _ = self.event_tx.send(GuiEvent::CheckUpdate);
                     }
-                    if ui.button("🌐 เปิดหน้า Releases").clicked() {
+                    if ui
+                        .button(format!("🌐 {}", tr(lang, "Open Releases page")))
+                        .clicked()
+                    {
                         let _ = self.event_tx.send(GuiEvent::OpenUrl(format!(
                             "https://github.com/{}/releases",
                             crate::update::DEFAULT_REPO
                         )));
                     }
-                    if ui.button("📂 เปิดโฟลเดอร์ Log").clicked() {
+                    if ui
+                        .button(format!("📂 {}", tr(lang, "Open Log Folder")))
+                        .clicked()
+                    {
                         let _ = self.event_tx.send(GuiEvent::OpenLogFolder);
                     }
                 });
@@ -3933,30 +4698,70 @@ impl WisprFlowGui {
                     ui.add_space(8.0);
                     ui.label(
                         egui::RichText::new(shape_thai(&format!(
-                            "🎉 มีเวอร์ชันใหม่: v{} (ปัจจุบัน v{})",
-                            info.latest, info.current
+                            "🎉 {}",
+                            tr2(
+                                lang,
+                                "New version available: v{} (current v{})",
+                                &info.latest,
+                                &info.current
+                            )
                         )))
                         .font(FontId::proportional(12.0))
                         .color(Color32::from_rgb(134, 239, 172)),
                     );
+                    let install_running = lock(&self.state.update_install).is_running();
                     ui.horizontal(|ui| {
-                        if ui.button("⬇️ ดาวน์โหลด").clicked() {
-                            let _ = self
-                                .event_tx
-                                .send(GuiEvent::OpenUrl(info.download_url.clone()));
+                        let install_label = if install_running {
+                            format!("⏳ {}", tr1(lang, "Installing v{}...", &info.latest))
+                        } else {
+                            format!("⬇️ {}", tr1(lang, "Install v{}", &info.latest))
+                        };
+                        if ui
+                            .add_enabled(
+                                !install_running,
+                                egui::Button::new(
+                                    egui::RichText::new(shape_thai(&install_label))
+                                        .font(FontId::proportional(12.0))
+                                        .color(Color32::WHITE)
+                                        .strong(),
+                                )
+                                .fill(Color32::from_rgb(22, 163, 74))
+                                .rounding(Rounding::same(6.0)),
+                            )
+                            .clicked()
+                        {
+                            let _ = self.event_tx.send(GuiEvent::InstallUpdate);
                         }
-                        if ui.button("📝 ดู Release Notes").clicked() {
+                        if ui
+                            .button(format!("📝 {}", tr(lang, "View Release Notes")))
+                            .clicked()
+                        {
                             let _ = self
                                 .event_tx
                                 .send(GuiEvent::OpenUrl(info.release_url.clone()));
                         }
                     });
+
+                    // Progress of the running installation.
+                    let install_state = lock(&self.state.update_install).clone();
+                    if install_state.is_running() {
+                        ui.add(
+                            egui::ProgressBar::new(install_state.percent as f32 / 100.0)
+                                .desired_width(ui.available_width())
+                                .fill(Color32::from_rgb(34, 197, 94)),
+                        );
+                        ui.label(
+                            egui::RichText::new(shape_thai(&install_state.message))
+                                .font(FontId::proportional(10.5))
+                                .color(Color32::from_rgb(148, 163, 184)),
+                        );
+                    }
                 } else if let Some(err) = update_error {
                     ui.add_space(8.0);
                     ui.label(
                         egui::RichText::new(shape_thai(&format!(
-                            "⚠️ ตรวจสอบอัปเดตไม่สำเร็จ: {}",
-                            err
+                            "⚠️ {}",
+                            tr1(lang, "Update check failed: {}", err)
                         )))
                         .font(FontId::proportional(11.0))
                         .color(Color32::from_rgb(252, 165, 165)),
@@ -3972,9 +4777,13 @@ impl WisprFlowGui {
                 if let Some(last) = last_check {
                     ui.add_space(4.0);
                     ui.label(
-                        egui::RichText::new(format!("ตรวจสอบล่าสุด: {}", last))
-                            .font(FontId::proportional(10.5))
-                            .color(Color32::from_rgb(100, 116, 139)),
+                        egui::RichText::new(tr1(
+                            lang,
+                            "Last checked: {}",
+                            friendly_timestamp(&last),
+                        ))
+                        .font(FontId::proportional(10.5))
+                        .color(Color32::from_rgb(100, 116, 139)),
                     );
                 }
             });
@@ -3982,19 +4791,20 @@ impl WisprFlowGui {
 
     /// The "Save all preferences" button, shared by every settings section.
     fn render_settings_save_button(&mut self, ui: &mut egui::Ui) {
+        let lang = self.ui_lang;
         ui.add_space(8.0);
         let dirty = self.settings_dirty();
 
         if dirty {
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("●  มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก")
+                    egui::RichText::new(format!("●  {}", tr(lang, "You have unsaved changes")))
                         .font(FontId::proportional(12.0))
                         .color(Color32::from_rgb(251, 191, 36))
                         .strong(),
                 );
                 ui.label(
-                    egui::RichText::new("(กด Save All Preferences เพื่อใช้งาน)")
+                    egui::RichText::new(tr(lang, "(press Save All Preferences to apply)"))
                         .font(FontId::proportional(11.0))
                         .color(Color32::from_rgb(148, 163, 184)),
                 );
@@ -4003,9 +4813,9 @@ impl WisprFlowGui {
         }
 
         let save_label = if dirty {
-            "💾  Save All Preferences  •"
+            format!("💾  {}  •", tr(lang, "Save All Preferences"))
         } else {
-            "💾  Save All Preferences"
+            format!("💾  {}", tr(lang, "Save All Preferences"))
         };
         let save_btn = egui::Button::new(
             egui::RichText::new(save_label)
@@ -4046,8 +4856,10 @@ impl WisprFlowGui {
         let _ = self
             .event_tx
             .send(GuiEvent::SaveConfig(Box::new(new_config)));
-        self.state
-            .set_toast("Settings & STT configurations saved successfully!");
+        self.state.set_toast(tr(
+            self.ui_lang,
+            "Settings & STT configurations saved successfully!",
+        ));
     }
 
     /// Builds the configuration from the current state of the settings form.
@@ -4117,6 +4929,7 @@ impl WisprFlowGui {
             client_name,
             client_version,
             stt_timeout_secs,
+            ui_language: self.settings_ui_language.clone(),
             silence_filter: self.settings_silence_filter,
             silence_sensitivity: self.settings_silence_sensitivity.clamp(0.0, 1.0),
             silence_stop_secs: self.settings_silence_stop_secs.clamp(0, 600),
@@ -4156,12 +4969,10 @@ impl WisprFlowGui {
     /// there is one, otherwise start a check.
     fn trigger_update_action(&self, pending: &Option<UpdateInfo>) {
         if let Some(info) = pending.as_ref() {
-            // Open the platform-appropriate download in the browser.
-            let _ = self
-                .event_tx
-                .send(GuiEvent::OpenUrl(info.download_url.clone()));
+            // Install it right here: download → checksum → replace → restart.
+            let _ = self.event_tx.send(GuiEvent::InstallUpdate);
             self.state
-                .set_toast(&format!("กำลังเปิดหน้าดาวน์โหลด v{}", info.latest));
+                .set_toast(&format!("กำลังติดตั้งอัปเดต v{}", info.latest));
         } else {
             let _ = self.event_tx.send(GuiEvent::CheckUpdate);
             self.state.set_toast("กำลังตรวจสอบอัปเดต...");
@@ -4176,8 +4987,13 @@ impl WisprFlowGui {
             return None;
         }
         let latest = info.latest.to_string();
-        let skipped =
-            lock(&self.state.config).skipped_update_version.as_deref() == Some(latest.as_str());
+        // The skipped version is kept outside of the config mutex: this
+        // function runs while the sidebar still holds the config lock, and
+        // locking a `std::sync::Mutex` twice on the same thread deadlocks.
+        let skipped = lock(&self.state.skipped_update_version)
+            .as_deref()
+            .map(|v| v == latest)
+            .unwrap_or(false);
         if skipped {
             return None;
         }
@@ -4228,7 +5044,7 @@ impl WisprFlowGui {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    egui::RichText::new("⬇️ ดาวน์โหลด")
+                                    egui::RichText::new(shape_thai("⬇️ ติดตั้ง"))
                                         .font(FontId::proportional(11.5))
                                         .color(Color32::WHITE)
                                         .strong(),
@@ -4237,9 +5053,7 @@ impl WisprFlowGui {
                             )
                             .clicked()
                         {
-                            let _ = self
-                                .event_tx
-                                .send(GuiEvent::OpenUrl(info.download_url.clone()));
+                            let _ = self.event_tx.send(GuiEvent::InstallUpdate);
                         }
                         if ui
                             .add(
@@ -4272,6 +5086,7 @@ impl WisprFlowGui {
             return;
         }
 
+        let lang = self.ui_lang;
         let badge = self
             .state
             .config
@@ -4280,20 +5095,28 @@ impl WisprFlowGui {
             .unwrap_or("Wflow");
 
         let (label, color) = match status {
-            DictationStatus::Listening => ("กำลังฟัง...", Color32::from_rgb(239, 68, 68)),
-            DictationStatus::Transcribing => ("กำลังประมวลผล...", Color32::from_rgb(168, 85, 247)),
-            DictationStatus::Pasting | DictationStatus::Done => {
-                ("แทรกข้อความแล้ว", Color32::from_rgb(16, 185, 129))
+            DictationStatus::Listening => {
+                (tr(lang, "Listening..."), Color32::from_rgb(239, 68, 68))
             }
-            DictationStatus::Error => ("เกิดข้อผิดพลาด", Color32::from_rgb(245, 158, 11)),
-            DictationStatus::Idle => ("พร้อมใช้งาน", Color32::from_rgb(148, 163, 184)),
+            DictationStatus::Transcribing => {
+                (tr(lang, "Processing..."), Color32::from_rgb(168, 85, 247))
+            }
+            DictationStatus::Pasting | DictationStatus::Done => {
+                (tr(lang, "Text inserted"), Color32::from_rgb(16, 185, 129))
+            }
+            DictationStatus::Error => (
+                tr(lang, "Something went wrong"),
+                Color32::from_rgb(245, 158, 11),
+            ),
+            DictationStatus::Idle => (tr(lang, "Ready"), Color32::from_rgb(148, 163, 184)),
         };
 
         let viewport_id = egui::ViewportId::from_hash_of("wflow_hud");
         let monitor = ctx
             .input(|i| i.viewport().monitor_size)
             .unwrap_or(egui::vec2(1920.0, 1080.0));
-        let position = egui::pos2((monitor.x - 300.0) * 0.5, monitor.y - 110.0);
+        let hud_width = 320.0;
+        let position = egui::pos2((monitor.x - hud_width) * 0.5, monitor.y - 110.0);
         ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::OuterPosition(position));
 
         let builder = egui::ViewportBuilder::default()
@@ -4301,13 +5124,21 @@ impl WisprFlowGui {
             .with_decorations(false)
             .with_always_on_top()
             .with_transparent(true)
-            .with_mouse_passthrough(true)
+            // The HUD carries a real stop button, so it must receive clicks.
+            .with_mouse_passthrough(false)
             .with_resizable(false)
-            .with_inner_size([300.0, 58.0]);
+            .with_inner_size([hud_width, 58.0]);
 
         let animation_time = self.animation_time;
         let badge = badge.to_string();
         let label = label.to_string();
+        let event_tx = self.event_tx.clone();
+        // Only the active states offer a stop button; a finished status just
+        // fades away by itself.
+        let can_stop = matches!(
+            status,
+            DictationStatus::Listening | DictationStatus::Transcribing
+        );
 
         ctx.show_viewport_immediate(viewport_id, builder, move |ctx, _class| {
             egui::CentralPanel::default()
@@ -4315,54 +5146,87 @@ impl WisprFlowGui {
                 .show(ctx, |ui| {
                     let rect = ui.max_rect();
                     let painter = ui.painter();
+                    let pill = rect.shrink(3.0);
                     painter.rect_filled(
-                        rect.shrink(3.0),
+                        pill,
                         Rounding::same(22.0),
-                        Color32::from_rgba_unmultiplied(12, 16, 26, 235),
+                        Color32::from_rgba_unmultiplied(12, 16, 26, 238),
                     );
                     painter.rect_stroke(
-                        rect.shrink(3.0),
+                        pill,
                         Rounding::same(22.0),
                         Stroke::new(1.0_f32, color.gamma_multiply(0.7)),
                     );
 
                     painter.circle_filled(
-                        Pos2::new(rect.min.x + 26.0, rect.center().y),
+                        Pos2::new(pill.min.x + 22.0, pill.center().y),
                         5.0,
                         color,
                     );
 
                     painter.text(
-                        Pos2::new(rect.min.x + 42.0, rect.center().y),
+                        Pos2::new(pill.min.x + 36.0, pill.center().y),
                         egui::Align2::LEFT_CENTER,
                         &badge,
-                        FontId::proportional(12.0),
+                        FontId::proportional(11.5),
                         Color32::from_rgb(148, 163, 184),
                     );
                     painter.text(
-                        Pos2::new(rect.min.x + 100.0, rect.center().y),
+                        Pos2::new(pill.min.x + 92.0, pill.center().y),
                         egui::Align2::LEFT_CENTER,
                         shape_thai(&label),
                         FontId::proportional(12.5),
                         Color32::WHITE,
                     );
 
-                    // Miniature waveform reacts to the live microphone level.
-                    let bar_count = 7;
-                    let base_x = rect.max.x - 72.0;
+                    // Miniature waveform reacts to the live microphone level
+                    // and shrinks while the stop button takes the right edge.
+                    let bar_count = 6;
+                    let base_x = pill.max.x - 92.0;
                     for index in 0..bar_count {
                         let phase = animation_time * 6.0 + index as f32 * 0.9;
                         let level = (amplitude * 18.0).clamp(0.0, 1.0);
-                        let height = 3.0 + (phase.sin().abs() * 16.0 * (0.25 + level));
-                        let x = base_x + index as f32 * 8.0;
+                        let height = 3.0 + (phase.sin().abs() * 14.0 * (0.25 + level));
+                        let x = base_x + index as f32 * 7.0;
                         painter.rect_filled(
                             Rect::from_center_size(
-                                Pos2::new(x, rect.center().y),
-                                Vec2::new(4.0, height),
+                                Pos2::new(x, pill.center().y),
+                                Vec2::new(3.5, height),
                             ),
                             Rounding::same(2.0),
                             color.gamma_multiply(0.85),
                         );
+                    }
+
+                    if can_stop {
+                        let button_rect = Rect::from_center_size(
+                            Pos2::new(pill.max.x - 26.0, pill.center().y),
+                            Vec2::splat(30.0),
+                        );
+                        let response = ui
+                            .interact(button_rect, ui.id().with("hud_stop"), egui::Sense::click())
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(tr(lang, "Stop recording"));
+
+                        let hovered = response.hovered();
+                        painter.circle_filled(
+                            button_rect.center(),
+                            14.0,
+                            if hovered {
+                                Color32::from_rgb(248, 113, 113)
+                            } else {
+                                Color32::from_rgb(220, 38, 38)
+                            },
+                        );
+                        painter.rect_filled(
+                            Rect::from_center_size(button_rect.center(), Vec2::splat(9.0)),
+                            Rounding::same(2.0),
+                            Color32::WHITE,
+                        );
+
+                        if response.clicked() {
+                            let _ = event_tx.send(GuiEvent::StopDictation);
+                        }
                     }
                 });
 
@@ -4445,6 +5309,7 @@ impl WisprFlowGui {
     }
 
     fn render_exit_confirmation_modal(&mut self, ctx: &egui::Context) {
+        let lang = self.ui_lang;
         let toggle_key_name = self.settings_toggle.format_display();
         let mut close_modal = false;
         let mut do_exit = false;
@@ -4454,24 +5319,38 @@ impl WisprFlowGui {
             close_modal = true;
         }
 
-        egui::Window::new(shape_thai("⚠️ ยืนยันการปิดโปรแกรม (Confirm Exit)"))
+        egui::Window::new(shape_thai(&format!(
+            "⚠️ {}",
+            tr(lang, "Confirm Exit")
+        )))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .fixed_size([380.0, 150.0])
+            // The theme's window fill is translucent; the dialog needs to be
+            // fully opaque so the page behind it does not show through.
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(Color32::from_rgb(17, 23, 36))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(51, 65, 85))),
+            )
             .show(ctx, |ui| {
                 ui.add_space(8.0);
                 ui.label(
-                    egui::RichText::new(shape_thai("คุณต้องการปิดโปรแกรม Wflow ใช่หรือไม่?"))
+                    egui::RichText::new(shape_thai(tr(
+                        lang,
+                        "Do you really want to quit Wflow?",
+                    )))
                         .font(FontId::proportional(14.5))
                         .color(Color32::WHITE)
                         .strong(),
                 );
                 ui.add_space(4.0);
                 ui.label(
-                    egui::RichText::new(shape_thai(
-                        "หากเลือก 'ย่อลง Tray' โปรแกรมจะยังคงรอรับคำสั่งเสียงผ่านปุ่มลัดได้ในพื้นหลัง",
-                    ))
+                    egui::RichText::new(shape_thai(tr(
+                        lang,
+                        "If you minimize to the tray, Wflow keeps listening for your dictation hotkey in the background.",
+                    )))
                     .font(FontId::proportional(11.5))
                     .color(Color32::from_rgb(148, 163, 184)),
                 );
@@ -4482,7 +5361,10 @@ impl WisprFlowGui {
                 ui.horizontal(|ui| {
                     // 1. Confirm Exit
                     let exit_btn = egui::Button::new(
-                        egui::RichText::new(shape_thai("🔴 ปิดโปรแกรม (Exit)"))
+                        egui::RichText::new(shape_thai(&format!(
+                            "🔴 {}",
+                            tr(lang, "Exit")
+                        )))
                             .font(FontId::proportional(11.5))
                             .color(Color32::WHITE)
                             .strong(),
@@ -4500,7 +5382,10 @@ impl WisprFlowGui {
 
                     // 2. Minimize to Tray
                     let tray_btn = egui::Button::new(
-                        egui::RichText::new(shape_thai("📌 ย่อลง Tray"))
+                        egui::RichText::new(shape_thai(&format!(
+                            "📌 {}",
+                            tr(lang, "Minimize to Tray")
+                        )))
                             .font(FontId::proportional(11.5))
                             .color(Color32::WHITE),
                     )
@@ -4517,7 +5402,7 @@ impl WisprFlowGui {
 
                     // 3. Cancel
                     let cancel_btn = egui::Button::new(
-                        egui::RichText::new(shape_thai("ยกเลิก (Cancel)"))
+                        egui::RichText::new(shape_thai(tr(lang, "Cancel")))
                             .font(FontId::proportional(11.5))
                             .color(Color32::from_rgb(203, 213, 225)),
                     )
@@ -4545,9 +5430,10 @@ impl WisprFlowGui {
                 crate::platform::PlatformManager::hide_main_window();
                 self.state.window_visible.store(false, Ordering::SeqCst);
             }
-            self.state.set_toast(&format!(
-                "ย่อลง Tray แล้ว กด {} หรือคลิกที่ Tray เพื่อเปิดใหม่",
-                toggle_key_name
+            self.state.set_toast(&tr1(
+                self.ui_lang,
+                "Minimized to the tray. Press {} or click the tray icon to reopen.",
+                toggle_key_name,
             ));
         } else if close_modal {
             self.show_exit_confirmation = false;
@@ -4561,14 +5447,15 @@ mod tests {
 
     #[test]
     fn update_button_is_always_labelled() {
-        let (label, _, _, _) = update_button_style(None, false, "0.2.1", 0.0);
+        let (label, _, _, _) = update_button_style(Lang::Th, None, false, "0.2.1", 0.0);
         assert!(label.contains("อัปเดต"), "idle label: {}", label);
         assert!(label.contains("0.2.1"), "idle label: {}", label);
     }
 
     #[test]
     fn update_button_highlights_a_new_release() {
-        let (label, fill, _, text) = update_button_style(Some("0.3.0"), false, "0.2.1", 0.0);
+        let (label, fill, _, text) =
+            update_button_style(Lang::Th, Some("0.3.0"), false, "0.2.1", 0.0);
         assert!(label.contains("0.3.0"), "label: {}", label);
         assert_eq!(fill, Color32::from_rgb(22, 163, 74));
         assert_eq!(text, Color32::WHITE);
@@ -4576,7 +5463,77 @@ mod tests {
 
     #[test]
     fn update_button_shows_progress() {
-        let (label, _, _, _) = update_button_style(None, true, "0.2.1", 0.0);
+        let (label, _, _, _) = update_button_style(Lang::Th, None, true, "0.2.1", 0.0);
         assert!(label.contains("กำลังตรวจสอบ"), "label: {}", label);
+    }
+
+    /// The sidebar renders while the config mutex is held, and it asks for the
+    /// pending update. Reading the skipped version from the config there would
+    /// lock a `std::sync::Mutex` twice on the same thread and freeze the whole
+    /// interface as soon as a new release is available.
+    #[tokio::test]
+    async fn pending_update_does_not_lock_the_config() {
+        let state = AppState::new(AppConfig::default(), Vec::new(), Vec::new());
+        let gui = WisprFlowGui::new(
+            state.clone(),
+            mpsc::unbounded_channel().0,
+            tokio::runtime::Handle::current(),
+        );
+
+        // Simulate a new release.
+        if let Ok(mut lock) = state.update_info.lock() {
+            *lock = Some(UpdateInfo {
+                current: semver::Version::new(0, 3, 4),
+                latest: semver::Version::new(0, 3, 5),
+                title: "v0.3.5".into(),
+                notes: String::new(),
+                release_url: "https://example.test/release".into(),
+                download_url: "https://example.test/deb".into(),
+                archive_url: Some("https://example.test/tar.gz".into()),
+                deb_url: Some("https://example.test/deb".into()),
+                windows_setup_url: None,
+                checksums_url: Some("https://example.test/SHA256SUMS.txt".into()),
+                published_at: None,
+                prerelease: false,
+            });
+        }
+
+        // Hold the config lock, like the sidebar does, and ask for the update.
+        let _cfg = lock(&state.config);
+        let pending = gui.pending_update();
+        assert!(pending.is_some(), "the new release must be visible");
+    }
+
+    /// A version the user skipped must not be offered again.
+    #[tokio::test]
+    async fn skipped_version_is_not_offered() {
+        let state = AppState::new(AppConfig::default(), Vec::new(), Vec::new());
+        let gui = WisprFlowGui::new(
+            state.clone(),
+            mpsc::unbounded_channel().0,
+            tokio::runtime::Handle::current(),
+        );
+
+        if let Ok(mut lock) = state.update_info.lock() {
+            *lock = Some(UpdateInfo {
+                current: semver::Version::new(0, 3, 4),
+                latest: semver::Version::new(0, 3, 5),
+                title: "v0.3.5".into(),
+                notes: String::new(),
+                release_url: "https://example.test/release".into(),
+                download_url: "https://example.test/deb".into(),
+                archive_url: Some("https://example.test/tar.gz".into()),
+                deb_url: Some("https://example.test/deb".into()),
+                windows_setup_url: None,
+                checksums_url: Some("https://example.test/SHA256SUMS.txt".into()),
+                published_at: None,
+                prerelease: false,
+            });
+        }
+        if let Ok(mut skipped) = state.skipped_update_version.lock() {
+            *skipped = Some("0.3.5".to_string());
+        }
+
+        assert!(gui.pending_update().is_none());
     }
 }

@@ -456,6 +456,11 @@ impl PlatformManager {
         Ok(handle)
     }
 
+    /// The low-level `WH_KEYBOARD_LL` hook is always active on Windows.
+    pub fn has_global_hotkeys() -> bool {
+        true
+    }
+
     #[allow(dead_code)]
     pub fn get_hotkey_vk() -> u16 {
         Self::get_hotkey_combo().key

@@ -26,7 +26,16 @@ pub struct UpdateInfo {
     pub title: String,
     pub notes: String,
     pub release_url: String,
+    /// Installer for the current platform, opened in the browser.
     pub download_url: String,
+    /// Portable archive with the raw binary; used for the self-update.
+    pub archive_url: Option<String>,
+    /// Debian package; used when the running binary cannot be replaced.
+    pub deb_url: Option<String>,
+    /// Windows installer (Inno Setup); launched instead of a self-replace.
+    pub windows_setup_url: Option<String>,
+    /// Checksum manifest of the release.
+    pub checksums_url: Option<String>,
     pub published_at: Option<String>,
     pub prerelease: bool,
 }
@@ -133,6 +142,74 @@ fn pick_download(release: &GithubRelease) -> String {
         .unwrap_or_else(|| release.html_url.clone())
 }
 
+/// Finds the first asset whose name matches the predicate.
+fn find_asset<F: Fn(&str) -> bool>(release: &GithubRelease, predicate: F) -> Option<String> {
+    release
+        .assets
+        .iter()
+        .find(|asset| predicate(&asset.name))
+        .map(|asset| asset.browser_download_url.clone())
+}
+
+/// The portable archive holding the raw binary (`wflow-<version>-linux-x86_64.tar.gz`).
+///
+/// Only archives built for the current platform are picked, so a Linux build
+/// is never offered to a macOS or Windows user.
+fn find_archive(release: &GithubRelease) -> Option<String> {
+    let platform = platform_tag();
+    find_asset(release, |name| {
+        let name = name.to_ascii_lowercase();
+        if !(name.ends_with(".tar.gz") || name.ends_with(".tgz")) {
+            return false;
+        }
+        match platform {
+            Some(tag) => name.contains(tag),
+            None => true,
+        }
+    })
+}
+
+/// The platform tag used in the release asset names.
+fn platform_tag() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        Some("linux")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Some("windows")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some("macos")
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// The Debian package, used when the running binary may not be replaced.
+fn find_deb(release: &GithubRelease) -> Option<String> {
+    find_asset(release, |name| name.to_ascii_lowercase().ends_with(".deb"))
+}
+
+/// The Windows installer (Inno Setup).
+fn find_windows_setup(release: &GithubRelease) -> Option<String> {
+    find_asset(release, |name| {
+        let name = name.to_ascii_lowercase();
+        name.ends_with(".exe") && name.contains("setup")
+    })
+}
+
+/// The checksum manifest that covers every other asset.
+fn find_checksums(release: &GithubRelease) -> Option<String> {
+    find_asset(release, |name| {
+        let name = name.to_ascii_lowercase();
+        name.starts_with("sha256sums") || name == "sha256sums.txt"
+    })
+}
+
 fn select_update(releases: Vec<GithubRelease>, include_prerelease: bool) -> Option<UpdateInfo> {
     let current = current_version();
     let mut candidates: Vec<(Version, GithubRelease)> = releases
@@ -157,6 +234,10 @@ fn select_update(releases: Vec<GithubRelease>, include_prerelease: bool) -> Opti
             .unwrap_or_else(|| release.tag_name.clone()),
         notes: release.body.clone().unwrap_or_default(),
         download_url: pick_download(&release),
+        archive_url: find_archive(&release),
+        deb_url: find_deb(&release),
+        windows_setup_url: find_windows_setup(&release),
+        checksums_url: find_checksums(&release),
         release_url: release.html_url,
         published_at: release.published_at,
         prerelease: release.prerelease,

@@ -9,6 +9,12 @@ use ksni::TrayMethods;
 
 static TRAY_HANDLE: Mutex<Option<ksni::Handle<WflowTray>>> = Mutex::new(None);
 
+/// True while the X11 global hotkey listener is running. The GUI only needs its
+/// own in-window fallback when no global hook is available (for example under
+/// Wayland); running both would toggle dictation twice per key press.
+static GLOBAL_HOTKEYS_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Debug)]
 pub struct WflowTray {
     pub is_recording: bool,
@@ -286,10 +292,17 @@ mod x11_keys {
         }
     }
 
+    /// `QueryKeymap` returns a 256-bit bitmap (32 bytes) in which bit `k` is
+    /// set while keycode `k` is held.
+    ///
+    /// The keycode is therefore a **bit** index, not a **byte** index. Using
+    /// it to index the byte slice directly only covers keycodes 0-31 and
+    /// silently reports every real key (F8 is keycode 74) as "not pressed".
     pub fn is_down(keys: &[u8], code: u8) -> bool {
-        keys.get(code as usize)
-            .map(|byte| byte & 1 != 0)
-            .unwrap_or(false)
+        match keys.get((code / 8) as usize) {
+            Some(byte) => byte & (1 << (code % 8)) != 0,
+            None => false,
+        }
     }
 
     pub fn any_down(keys: &[u8], codes: &[u8]) -> bool {
@@ -307,6 +320,7 @@ mod x11_keys {
 #[cfg(target_os = "linux")]
 fn run_hotkey_loop(tx: &mpsc::UnboundedSender<HotkeyEvent>) -> anyhow::Result<()> {
     let keyboard = x11_keys::Keyboard::connect()?;
+    GLOBAL_HOTKEYS_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
     info!("Linux X11 global hotkey listener active");
 
     let mut prev_hot = false;
@@ -337,6 +351,7 @@ fn run_hotkey_loop(tx: &mpsc::UnboundedSender<HotkeyEvent>) -> anyhow::Result<()
                 && x11_keys::modifiers_match(&keys, &keyboard, &hotkey);
 
             if hot != prev_hot {
+                tracing::debug!("Global dictation hotkey transition: down={hot}");
                 let event = if hot {
                     HotkeyEvent::Pressed
                 } else {
@@ -363,33 +378,47 @@ fn run_hotkey_loop(tx: &mpsc::UnboundedSender<HotkeyEvent>) -> anyhow::Result<()
 
         // Hotkey recording mode: report the first newly pressed non-modifier key.
         if let Some(mode) = recording {
-            let newly_pressed = keys
-                .iter()
-                .enumerate()
-                .find(|(index, byte)| {
-                    **byte & 1 != 0 && prev_keys.get(*index).map(|b| b & 1 == 0).unwrap_or(true)
-                })
-                .map(|(index, _)| index as u8)
-                .filter(|code| {
-                    keyboard
-                        .vk_for_keycode(*code)
-                        .map(|vk| !matches!(vk, 0x10..=0x12 | 0xA0..=0xA5 | 0x5B | 0x5C))
-                        .unwrap_or(false)
-                });
+            let is_modifier = |vk: u16| matches!(vk, 0x10..=0x12 | 0xA0..=0xA5 | 0x5B | 0x5C);
 
-            if let Some(code) = newly_pressed {
-                if let Some(vk) = keyboard.vk_for_keycode(code) {
-                    let combo = KeyCombo {
-                        ctrl: x11_keys::any_down(&keys, &keyboard.ctrl),
-                        alt: x11_keys::any_down(&keys, &keyboard.alt),
-                        shift: x11_keys::any_down(&keys, &keyboard.shift),
-                        win: x11_keys::any_down(&keys, &keyboard.win),
-                        key: vk,
-                    };
-                    let _ = tx.send(HotkeyEvent::KeyRecorded(mode, combo));
-                    if let Ok(mut lock) = RECORDING_MODE.lock() {
-                        *lock = None;
+            // The bitmap is indexed by keycode bit, so walk bits instead of
+            // bytes and map each set bit back to its keycode.
+            let mut newly_pressed = None;
+            'scan: for (byte_index, byte) in keys.iter().enumerate() {
+                for bit in 0..8u16 {
+                    let code = byte_index as u16 * 8 + bit;
+                    if code > u8::MAX as u16 {
+                        break 'scan;
                     }
+                    let down = byte & (1 << bit) != 0;
+                    let was_down = prev_keys
+                        .get(byte_index)
+                        .map(|b| b & (1 << bit) != 0)
+                        .unwrap_or(false);
+                    if !down || was_down {
+                        continue;
+                    }
+                    let Some(vk) = keyboard.vk_for_keycode(code as u8) else {
+                        continue;
+                    };
+                    if is_modifier(vk) {
+                        continue;
+                    }
+                    newly_pressed = Some(vk);
+                    break 'scan;
+                }
+            }
+
+            if let Some(vk) = newly_pressed {
+                let combo = KeyCombo {
+                    ctrl: x11_keys::any_down(&keys, &keyboard.ctrl),
+                    alt: x11_keys::any_down(&keys, &keyboard.alt),
+                    shift: x11_keys::any_down(&keys, &keyboard.shift),
+                    win: x11_keys::any_down(&keys, &keyboard.win),
+                    key: vk,
+                };
+                let _ = tx.send(HotkeyEvent::KeyRecorded(mode, combo));
+                if let Ok(mut lock) = RECORDING_MODE.lock() {
+                    *lock = None;
                 }
             }
         }
@@ -508,13 +537,19 @@ impl PlatformManager {
                     "Linux global hotkeys are unavailable ({}). Use the in-window dictation button or set DISPLAY for X11/XWayland.",
                     err
                 );
-                while !tx.is_closed() {
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                }
+            }
+            GLOBAL_HOTKEYS_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+            while !tx.is_closed() {
+                std::thread::sleep(std::time::Duration::from_millis(250));
             }
         });
 
         Ok(handle)
+    }
+
+    /// Whether a system-wide hotkey hook is active on this session.
+    pub fn has_global_hotkeys() -> bool {
+        GLOBAL_HOTKEYS_ACTIVE.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     #[allow(dead_code)]
@@ -657,5 +692,41 @@ impl PlatformManager {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::x11_keys::is_down;
+
+    /// `QueryKeymap` is a 256-bit bitmap: keycode 74 (F8) lives in byte 9,
+    /// bit 2. Indexing the byte slice by keycode used to read past the end.
+    #[test]
+    fn keymap_bits_are_indexed_by_keycode() {
+        let mut keys = vec![0u8; 32];
+        // Nothing is held in an all-zero bitmap, even for high keycodes.
+        assert!(!is_down(&keys, 74));
+        assert!(!is_down(&keys, 37));
+
+        // Press F8 (keycode 74): byte 9, bit 2.
+        keys[74 / 8] |= 1 << (74 % 8);
+        assert!(is_down(&keys, 74));
+        assert!(!is_down(&keys, 75));
+        assert!(!is_down(&keys, 66));
+
+        // Press Left Control (keycode 37): byte 4, bit 5.
+        keys[37 / 8] |= 1 << (37 % 8);
+        assert!(is_down(&keys, 37));
+        assert!(!is_down(&keys, 38));
+    }
+
+    #[test]
+    fn modifiers_resolve_to_real_keycodes() {
+        // A combo that requires Control must not match a plain key press.
+        let mut keys = vec![0u8; 32];
+        keys[74 / 8] |= 1 << (74 % 8);
+        assert!(is_down(&keys, 74));
+        // Control is not held.
+        assert!(!is_down(&keys, 37));
     }
 }

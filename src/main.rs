@@ -37,6 +37,10 @@ fn main() -> Result<()> {
             let _log_guard = init_logging();
             return run_update_check_cli();
         }
+        Cli::InstallUpdate => {
+            let _log_guard = init_logging();
+            return run_update_install_cli();
+        }
         Cli::Run => {}
     }
 
@@ -163,6 +167,7 @@ enum Cli {
     Version,
     Help,
     CheckUpdates,
+    InstallUpdate,
 }
 
 fn parse_cli() -> Cli {
@@ -170,6 +175,7 @@ fn parse_cli() -> Cli {
         match arg.as_str() {
             "-V" | "--version" => return Cli::Version,
             "--check-updates" => return Cli::CheckUpdates,
+            "--install-update" => return Cli::InstallUpdate,
             "-h" | "--help" => return Cli::Help,
             _ => {}
         }
@@ -179,7 +185,7 @@ fn parse_cli() -> Cli {
 
 fn print_help() {
     println!(
-        "Wflow {}\n\nUSAGE:\n    wflow [OPTIONS]\n\nOPTIONS:\n    --startup          Start minimized in the tray\n    --check-updates    Check for updates and exit\n    -V, --version      Print version\n    -h, --help         Show this help\n\nENVIRONMENT:\n    RUST_LOG                  Log filter (default: info)\n    WFLOW_AUTH_TOKEN          Account JWT (overrides stored secrets)\n    WFLOW_GROQ_API_KEY        Groq API key\n    WFLOW_ELEVENLABS_API_KEY  ElevenLabs API key\n    WFLOW_BASETEN_API_KEY     Baseten gateway key\n    WFLOW_UPDATE_REPO         GitHub repo used by the update checker",
+        "Wflow {}\n\nUSAGE:\n    wflow [OPTIONS]\n\nOPTIONS:\n    --startup          Start minimized in the tray\n    --check-updates    Check for updates and exit\n    --install-update   Download and install the latest release, then exit\n    -V, --version      Print version\n    -h, --help         Show this help\n\nENVIRONMENT:\n    RUST_LOG                  Log filter (default: info)\n    WFLOW_AUTH_TOKEN          Account JWT (overrides stored secrets)\n    WFLOW_GROQ_API_KEY        Groq API key\n    WFLOW_ELEVENLABS_API_KEY  ElevenLabs API key\n    WFLOW_BASETEN_API_KEY     Baseten gateway key\n    WFLOW_UPDATE_REPO         GitHub repo used by the update checker",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -205,6 +211,31 @@ fn run_update_check_cli() -> Result<()> {
             std::process::exit(1);
         }
     }
+    Ok(())
+}
+
+/// Downloads and installs the latest release from the command line.
+///
+/// Useful for scripted updates and for verifying the installer without
+/// starting the GUI.
+fn run_update_install_cli() -> Result<()> {
+    let config = AppConfig::load_or_default(None);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let info = rt.block_on(wflow::update::check(config.include_prerelease))?;
+    let Some(info) = info else {
+        println!("Wflow {} is up to date.", wflow::update::current_version());
+        return Ok(());
+    };
+
+    println!("Installing Wflow {} ...", info.latest);
+    let state = std::sync::Arc::new(std::sync::Mutex::new(
+        wflow::updater::InstallState::default(),
+    ));
+    // No restart: the command line installer replaces the binary and exits.
+    rt.block_on(wflow::updater::install_update(&info, &state, false))?;
+    println!("Wflow {} installed successfully.", info.latest);
     Ok(())
 }
 
@@ -312,6 +343,60 @@ fn spawn_update_check(runtime: &tokio::runtime::Handle, state: AppState, include
                 ctx.request_repaint();
             }
         }
+    });
+}
+
+/// Downloads, verifies and installs the pending update, then restarts.
+///
+/// The installation replaces the running executable, so the app has to quit
+/// afterwards; a helper process that is waiting for the current PID starts
+/// the new build once the lock file is free again.
+fn spawn_update_install(runtime: &tokio::runtime::Handle, state: AppState) {
+    let Some(info) = state
+        .update_info
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .filter(|info| info.is_newer())
+    else {
+        state.set_toast("ไม่มีอัปเดตใหม่ให้ติดตั้ง");
+        return;
+    };
+
+    // Never install two updates at the same time.
+    {
+        let mut install = state
+            .update_install
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if install.is_running() {
+            return;
+        }
+        install.stage = wflow::updater::InstallStage::Downloading;
+        install.percent = 0;
+        install.message = "กำลังดาวน์โหลดอัปเดต...".to_string();
+    }
+
+    let state = state.clone();
+    runtime.spawn(async move {
+        let result = wflow::updater::install_update(&info, &state.update_install, true).await;
+        match result {
+            Ok(()) => {
+                info!("Update to v{} installed successfully.", info.latest);
+                state.set_toast(&format!("ติดตั้ง v{} แล้ว กำลังเริ่มใหม่", info.latest));
+                // Quit so the helper can start the new build.
+                state.pending_quit.store(true, Ordering::SeqCst);
+            }
+            Err(err) => {
+                warn!("Update installation failed: {err:#}");
+                if let Ok(mut install) = state.update_install.lock() {
+                    install.stage = wflow::updater::InstallStage::Failed;
+                    install.message = format!("{err:#}");
+                }
+                state.set_toast(&format!("ติดตั้งอัปเดตไม่สำเร็จ: {err:#}"));
+            }
+        }
+        request_repaint(&state);
     });
 }
 
@@ -1267,6 +1352,22 @@ async fn run_background_coordinator(
                     Some(GuiEvent::RefreshDictionary) => {
                         refresh_dictionary(&state, &db);
                     }
+                    Some(GuiEvent::SetUiLanguage(code)) => {
+                        // Language is a UI preference: save it on the spot so
+                        // it survives a restart even if the user leaves the
+                        // settings page without pressing "Save All".
+                        let mut new_cfg = match state.config.lock() {
+                            Ok(lock) => lock.clone(),
+                            Err(err) => err.into_inner().clone(),
+                        };
+                        new_cfg.ui_language = code;
+                        if let Err(err) = new_cfg.save(None) {
+                            warn!("Could not save interface language: {}", err);
+                        }
+                        if let Ok(mut lock) = state.config.lock() {
+                            *lock = new_cfg;
+                        }
+                    }
                     Some(GuiEvent::SaveConfig(new_cfg)) => {
                         let new_cfg = *new_cfg;
                         if let Err(err) = new_cfg.save(None) {
@@ -1292,12 +1393,21 @@ async fn run_background_coordinator(
                         state.set_toast("กำลังตรวจสอบอัปเดต...");
                         request_repaint(&state);
                     }
+                    Some(GuiEvent::InstallUpdate) => {
+                        spawn_update_install(&runtime, state.clone());
+                    }
                     Some(GuiEvent::SkipUpdateVersion(version)) => {
                         if let Ok(mut cfg) = state.config.lock() {
-                            cfg.skipped_update_version = Some(version);
+                            cfg.skipped_update_version = Some(version.clone());
                             if let Err(err) = cfg.save(None) {
                                 warn!("Could not save skipped update: {}", err);
                             }
+                        }
+                        // The GUI reads the skipped version from its own copy
+                        // so that it never has to lock the config mutex while
+                        // it is already held.
+                        if let Ok(mut skipped) = state.skipped_update_version.lock() {
+                            *skipped = Some(version);
                         }
                         request_repaint(&state);
                     }

@@ -71,6 +71,10 @@ pub mod mock {
             Ok(std::thread::spawn(|| {}))
         }
 
+        pub fn has_global_hotkeys() -> bool {
+            false
+        }
+
         pub fn get_hotkey_vk() -> u16 {
             0x77
         }

@@ -219,6 +219,15 @@ pub struct AppConfig {
     /// Protocol compatibility version announced to the gRPC backend.
     #[serde(default = "default_client_version")]
     pub client_version: String,
+    /// Language of the interface itself: `"th"` (Thai) or `"en"` (English).
+    /// Independent of `language_code`, which tells the STT engine what to
+    /// transcribe.
+    #[serde(default = "default_ui_language")]
+    pub ui_language: String,
+}
+
+fn default_ui_language() -> String {
+    "th".to_string()
 }
 
 fn default_true() -> bool {
@@ -346,6 +355,7 @@ impl Default for AppConfig {
             mixed_spacing: true,
             client_name: default_client_name(),
             client_version: default_client_version(),
+            ui_language: default_ui_language(),
         }
     }
 }
