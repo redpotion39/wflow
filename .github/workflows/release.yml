@@ -156,6 +156,16 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f | sort
 
+      # The Linux job can only hash the files it built. The in-app updater
+      # verifies whatever it downloads against this manifest, Windows
+      # installer included, so the manifest has to be rebuilt from the merged
+      # artifact set instead of reusing the Linux-only one.
+      - name: Generate combined checksums
+        run: |
+          cd artifacts
+          sha256sum ./*.deb ./*.run ./*.tar.gz ./*.exe > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -174,5 +184,6 @@ jobs:
             sha256sum -c SHA256SUMS.txt
             ```
 
-            The checksum file covers the Linux artifacts. Verify the Windows
-            installer with `Get-FileHash Wflow-Setup-<version>.exe -Algorithm SHA256`.
+            The checksum file covers every artifact, including the Windows
+            installer, which can also be checked on its own with
+            `Get-FileHash Wflow-Setup-<version>.exe -Algorithm SHA256`.
