@@ -47,6 +47,8 @@ pub mod mock {
     pub enum HotkeyEvent {
         Pressed,
         Released,
+        /// The stop button on the floating HUD was clicked: finish the take.
+        StopFromHud,
         ToggleWindow,
         QuitApp,
         KeyRecorded(u8, crate::config::KeyCombo),

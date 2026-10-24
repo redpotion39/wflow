@@ -1372,6 +1372,10 @@ async fn run_background_coordinator(
                             session.finish(&state, &db).await;
                         }
                     }
+                    Some(HotkeyEvent::StopFromHud) => {
+                        info!("Stop pressed on the floating HUD; finishing the take.");
+                        session.finish(&state, &db).await;
+                    }
                     Some(HotkeyEvent::ToggleWindow) => {
                         info!("Received ToggleWindow event from hotkey or tray.");
                         #[cfg(target_os = "windows")]

@@ -8,8 +8,9 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, W
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateBitmap, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
     CreatePen, CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect,
-    InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TextOutW,
-    DEFAULT_CHARSET, FW_BOLD, FW_NORMAL, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT,
+    InvalidateRect, RoundRect, ScreenToClient, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
+    TextOutW, DEFAULT_CHARSET, FW_BOLD, FW_NORMAL, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY,
+    TRANSPARENT,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -26,8 +27,8 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-    VK_CONTROL, VK_V,
+    SendInput, TrackMouseEvent, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_KEYUP, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL, VK_V,
 };
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
@@ -37,17 +38,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, FindWindowW, GetClassNameW,
     GetClientRect, GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics,
-    GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, KillTimer, LoadIconW, LoadImageW,
-    PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos,
-    SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, HICON,
-    HWND_TOP, ICONINFO, IDI_APPLICATION, IMAGE_ICON, KBDLLHOOKSTRUCT, LR_DEFAULTCOLOR, MF_CHECKED,
-    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, SM_CXSCREEN, SM_CXSMICON, SM_CYSCREEN, SM_CYSMICON,
+    GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, KillTimer, LoadCursorW, LoadIconW,
+    LoadImageW, PostQuitMessage, RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow,
+    SetTimer, SetWindowPos, SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage,
+    UnhookWindowsHookEx, HICON, HTCLIENT, HWND_TOP, ICONINFO, IDC_HAND, IDI_APPLICATION,
+    IMAGE_ICON, KBDLLHOOKSTRUCT, LR_DEFAULTCOLOR, MA_NOACTIVATE, MF_CHECKED, MF_SEPARATOR,
+    MF_STRING, MF_UNCHECKED, MSG, SM_CXSCREEN, SM_CXSMICON, SM_CYSCREEN, SM_CYSMICON,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE,
     SW_SHOW, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL, WINDOW_EX_STYLE,
     WM_APP, WM_CLOSE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETICON,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
+    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT, WM_QUERYENDSESSION,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
 };
 
 use crate::ui::DictationStatus;
@@ -68,6 +70,8 @@ use crate::config::KeyCombo;
 pub enum HotkeyEvent {
     Pressed,
     Released,
+    /// The stop button on the floating HUD was clicked: finish the take.
+    StopFromHud,
     #[allow(dead_code)]
     ToggleWindow,
     QuitApp,
@@ -91,19 +95,54 @@ static HUD_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new
 static HUD_AMPLITUDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static HUD_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static HUD_BADGE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+// Pointer is currently over the HUD's stop button (drives the hover colour).
+static HUD_STOP_HOVER: AtomicBool = AtomicBool::new(false);
 // Current DPI of the monitor the HUD sits on (96 = 100% scaling). The HUD is
 // authored in design pixels for 96 DPI and scaled by HUD_DPI/96 at draw time
 // so it keeps the same physical size on HiDPI laptop screens.
 static HUD_DPI: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(96);
 const WM_TRAY_CALLBACK: u32 = WM_APP + 101;
+/// `WM_MOUSELEAVE`. The windows crate only exposes it from `UI::Controls`,
+/// which this build does not enable, so it is declared here.
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 /// Design size of the floating HUD, in 96-DPI pixels.
-const HUD_DESIGN_W: i32 = 280;
+const HUD_DESIGN_W: i32 = 312;
 const HUD_DESIGN_H: i32 = 58;
+
+/// The stop button that ends the recording without reaching for the keyboard.
+/// Only drawn while the microphone is live, in 96-DPI design pixels.
+const HUD_STOP_LEFT: f32 = 256.0;
+const HUD_STOP_TOP: f32 = 17.0;
+const HUD_STOP_SIZE: f32 = 24.0;
 
 #[inline]
 fn hud_scale() -> f32 {
     HUD_DPI.load(Ordering::SeqCst) as f32 / 96.0
+}
+
+/// True when a client-area point in physical pixels lands on the stop button.
+/// The button is only present while dictation is recording, so a click on the
+/// same corner in the other states is ignored.
+fn hud_stop_hit(x: i32, y: i32) -> bool {
+    if HUD_STATE.load(Ordering::SeqCst) != 1 {
+        return false;
+    }
+    let k = hud_scale();
+    // A few pixels of slack so the 24px circle is comfortable to hit.
+    let pad = (4.0 * k).round() as i32;
+    let left = (HUD_STOP_LEFT * k).round() as i32 - pad;
+    let top = (HUD_STOP_TOP * k).round() as i32 - pad;
+    let right = ((HUD_STOP_LEFT + HUD_STOP_SIZE) * k).round() as i32 + pad;
+    let bottom = ((HUD_STOP_TOP + HUD_STOP_SIZE) * k).round() as i32 + pad;
+    x >= left && x <= right && y >= top && y <= bottom
+}
+
+/// Client coordinates carried by a mouse message.
+fn mouse_xy(l_param: LPARAM) -> (i32, i32) {
+    let x = (l_param.0 & 0xFFFF) as u16 as i16 as i32;
+    let y = ((l_param.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+    (x, y)
 }
 
 /// Repositions and resizes the HUD window for its current monitor DPI and
@@ -549,6 +588,7 @@ impl PlatformManager {
             *lock = provider_badge.to_string();
         }
         HUD_STATE.store(1, Ordering::SeqCst); // 1 = Listening
+        HUD_STOP_HOVER.store(false, Ordering::SeqCst);
         let val = HUD_HWND.load(Ordering::SeqCst);
         if val != 0 {
             let hwnd = HWND(val as *mut core::ffi::c_void);
@@ -725,6 +765,7 @@ impl PlatformManager {
 
     pub fn hide_floating_hud() {
         HUD_STATE.store(0, Ordering::SeqCst);
+        HUD_STOP_HOVER.store(false, Ordering::SeqCst);
         let val = HUD_HWND.load(Ordering::SeqCst);
         if val != 0 {
             let hwnd = HWND(val as *mut core::ffi::c_void);
@@ -1234,6 +1275,59 @@ unsafe extern "system" fn hud_wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_ERASEBKGND => LRESULT(1), // Prevent flicker
+        // The HUD is a non-activating overlay: clicking its stop button must
+        // not pull focus away from the app the user is dictating into.
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_MOUSEMOVE => {
+            let (x, y) = mouse_xy(l_param);
+            let over = hud_stop_hit(x, y);
+            if HUD_STOP_HOVER.swap(over, Ordering::SeqCst) != over {
+                let _ = InvalidateRect(hwnd, None, false);
+            }
+            // Ask for one WM_MOUSELEAVE so the highlight clears even when the
+            // pointer leaves without another move inside the window.
+            let mut tme = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            let _ = TrackMouseEvent(&mut tme);
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            if HUD_STOP_HOVER.swap(false, Ordering::SeqCst) {
+                let _ = InvalidateRect(hwnd, None, false);
+            }
+            LRESULT(0)
+        }
+        WM_SETCURSOR => {
+            if (l_param.0 & 0xFFFF) as u32 == HTCLIENT {
+                let mut pt = POINT::default();
+                if GetCursorPos(&mut pt).is_ok()
+                    && ScreenToClient(hwnd, &mut pt).as_bool()
+                    && hud_stop_hit(pt.x, pt.y)
+                {
+                    let _ = SetCursor(LoadCursorW(None, IDC_HAND).unwrap_or_default());
+                    return LRESULT(1);
+                }
+            }
+            DefWindowProcW(hwnd, msg, w_param, l_param)
+        }
+        WM_LBUTTONUP => {
+            let (x, y) = mouse_xy(l_param);
+            if hud_stop_hit(x, y) {
+                HUD_STOP_HOVER.store(false, Ordering::SeqCst);
+                info!("Stop button on the floating HUD clicked.");
+                if let Ok(guard) = HOOK_TX.lock() {
+                    if let Some(tx) = guard.as_ref() {
+                        let _ = tx.send(HotkeyEvent::StopFromHud);
+                    }
+                }
+                let _ = InvalidateRect(hwnd, None, false);
+            }
+            LRESULT(0)
+        }
         WM_DPICHANGED => {
             // Per-Monitor-V2: the window moved to a monitor with a different
             // DPI. The suggested rectangle (lParam) already carries the
@@ -1284,9 +1378,10 @@ unsafe extern "system" fn hud_wnd_proc(
             // HiDPI: the drawing below is authored in 96-DPI design pixels and
             // every coordinate is multiplied by the monitor scale. The world
             // transform used to do this, but it silently failed to scale the
-            // drawing on some machines: the capsule stayed 280x58 inside a
-            // 350x73 window and the rest of the back buffer showed through as
-            // a white block. Explicit scaling cannot be ignored by the driver.
+            // drawing on some machines: the capsule stayed at its design size
+            // inside the larger window and the rest of the back buffer showed
+            // through as a white block. Explicit scaling cannot be ignored by
+            // the driver.
             let k = hud_scale();
             let s = |v: f32| (v * k).round() as i32;
 
@@ -1489,6 +1584,49 @@ unsafe extern "system" fn hud_wnd_proc(
                 let _ = SelectObject(mem_dc, old_p3);
                 let _ = DeleteObject(bar_brush);
                 let _ = DeleteObject(null_pen2);
+            }
+
+            // 4. Stop button while the microphone is live. It ends the take
+            // without reaching for the hotkey, and never takes focus away from
+            // the window the text will be pasted into.
+            if state == 1 {
+                let bx = s(HUD_STOP_LEFT);
+                let by = s(HUD_STOP_TOP);
+                let size = s(HUD_STOP_SIZE).max(4);
+                let fill = if HUD_STOP_HOVER.load(Ordering::SeqCst) {
+                    COLORREF(0x007171F8) // lighter stop red on hover
+                } else {
+                    COLORREF(0x004444EF) // stop red
+                };
+                let btn_brush = CreateSolidBrush(fill);
+                let null_pen3 = CreatePen(PS_NULL, 0, COLORREF(0));
+                let old_b4 = SelectObject(mem_dc, btn_brush);
+                let old_p4 = SelectObject(mem_dc, null_pen3);
+                let btn_r = s(8.0).max(1);
+                let _ = RoundRect(mem_dc, bx, by, bx + size, by + size, btn_r, btn_r);
+
+                // White square glyph, the same "stop" shape as the app.
+                let glyph_brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
+                let old_b5 = SelectObject(mem_dc, glyph_brush);
+                let glyph = s(8.0).max(2);
+                let gx = bx + size / 2;
+                let gy = by + size / 2;
+                let glyph_r = s(2.0).max(1);
+                let _ = RoundRect(
+                    mem_dc,
+                    gx - glyph / 2,
+                    gy - glyph / 2,
+                    gx + glyph / 2,
+                    gy + glyph / 2,
+                    glyph_r,
+                    glyph_r,
+                );
+                let _ = SelectObject(mem_dc, old_b5);
+                let _ = DeleteObject(glyph_brush);
+                let _ = SelectObject(mem_dc, old_b4);
+                let _ = SelectObject(mem_dc, old_p4);
+                let _ = DeleteObject(btn_brush);
+                let _ = DeleteObject(null_pen3);
             }
 
             // Copy back buffer to screen

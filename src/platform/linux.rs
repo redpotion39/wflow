@@ -146,6 +146,8 @@ pub struct ActiveAppContext {
 pub enum HotkeyEvent {
     Pressed,
     Released,
+    /// The stop button on the floating HUD was clicked: finish the take.
+    StopFromHud,
     ToggleWindow,
     QuitApp,
     KeyRecorded(u8, KeyCombo),
