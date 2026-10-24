@@ -181,7 +181,7 @@ jobs:
             ## Verification
 
             ```bash
-            sha256sum -c SHA256SUMS.txt
+            sha256sum -c --ignore-missing SHA256SUMS.txt
             ```
 
             The checksum file covers every artifact, including the Windows

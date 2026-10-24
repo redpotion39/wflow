@@ -214,7 +214,7 @@ pub fn tr(lang: Lang, en: &'static str) -> &'static str {
         }
         "Check now" => "ตรวจสอบเดี๋ยวนี้",
         "Checked against GitHub Releases" => "ตรวจสอบผ่าน GitHub Releases",
-        "Checked automatically every 15 minutes and at startup (configurable in Settings)" => "ตรวจอัตโนมัติทุก 15 นาทีและเมื่อเปิดโปรแกรม (ตั้งค่าได้ในหน้าตั้งค่า)",
+        "Checked automatically at startup and at the interval set in Settings" => "ตรวจอัตโนมัติเมื่อเปิดโปรแกรมและตามช่วงเวลาที่ตั้งไว้ในหน้าตั้งค่า",
         "Checking for updates..." => "กำลังตรวจสอบอัปเดต...",
         "Choose the language of the Wflow interface. The language used for speech transcription is configured separately under Audio." => "เลือกภาษาที่ใช้แสดงผลหน้าจอ Wflow ส่วนภาษาที่ใช้ถอดเสียงพูดตั้งแยกได้ในหมวดเสียง",
         "Clear all dictation history" => "ล้างประวัติการพิมพ์ด้วยเสียงทั้งหมด",

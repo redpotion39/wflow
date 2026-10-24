@@ -3687,7 +3687,7 @@ impl WisprFlowGui {
                         "• {}",
                         tr(
                             lang,
-                            "Checked automatically every 15 minutes and at startup (configurable in Settings)",
+                            "Checked automatically at startup and at the interval set in Settings",
                         )
                     ))
                     .font(FontId::proportional(11.5))
