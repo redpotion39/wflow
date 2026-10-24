@@ -1612,7 +1612,7 @@ impl WisprFlowGui {
                 if icon_button(
                     ui,
                     Icon::Power,
-                    &shape_thai(tr(lang, "Exit")).to_string(),
+                    shape_thai(tr(lang, "Exit")).as_ref(),
                     30.0,
                     Color32::from_rgb(45, 18, 22),
                     Color32::from_rgb(185, 28, 28),
@@ -1997,7 +1997,7 @@ impl WisprFlowGui {
                         Color32::from_rgb(129, 140, 248),
                     )
                 };
-                let q_label = shape_thai(&q_text).to_string();
+                let q_label = shape_thai(q_text).to_string();
                 let q_galley = ui.painter().layout_no_wrap(
                     q_label.clone(),
                     FontId::proportional(12.0),
@@ -2206,7 +2206,7 @@ impl WisprFlowGui {
                                 Icon::Waveform,
                                 13.0,
                                 MUTED,
-                                &tr(lang, "AUDIO CAPTURE & WAVEFORM"),
+                                tr(lang, "AUDIO CAPTURE & WAVEFORM"),
                                 FontId::proportional(11.0),
                             );
 
@@ -2450,7 +2450,7 @@ impl WisprFlowGui {
                                 Icon::FileText,
                                 13.0,
                                 MUTED,
-                                &tr(lang, "LATEST TRANSCRIPTION"),
+                                tr(lang, "LATEST TRANSCRIPTION"),
                                 FontId::proportional(11.0),
                             );
                             if latency > 0.0 {
@@ -2541,7 +2541,7 @@ impl WisprFlowGui {
                                             surface_btn,
                                             surface_line,
                                             Color32::from_rgb(252, 165, 165),
-                                            &tr(lang, "Clear"),
+                                            tr(lang, "Clear"),
                                         ) {
                                             *lock(&self.state.last_transcript) = String::new();
                                             self.state.set_toast(tr(lang, "Transcript cleared"));
@@ -2555,7 +2555,7 @@ impl WisprFlowGui {
                                             surface_btn,
                                             surface_line,
                                             Color32::from_rgb(203, 213, 225),
-                                            &tr(lang, "Copy"),
+                                            tr(lang, "Copy"),
                                         ) {
                                             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                                 let _ = clipboard.set_text(&transcript);
@@ -2574,7 +2574,7 @@ impl WisprFlowGui {
                                             Color32::from_rgb(49, 46, 129),
                                             Color32::from_rgb(99, 102, 241),
                                             Color32::WHITE,
-                                            &tr(lang, "Re-paste"),
+                                            tr(lang, "Re-paste"),
                                         ) {
                                             let _ = PlatformManager::paste_text(&transcript);
                                             self.state.set_toast(tr(
@@ -2824,7 +2824,7 @@ impl WisprFlowGui {
                                 Icon::Clock,
                                 13.0,
                                 MUTED,
-                                &tr(lang, "RECENT ACTIVITY"),
+                                tr(lang, "RECENT ACTIVITY"),
                                 FontId::proportional(11.0),
                             );
                             ui.with_layout(
@@ -2849,7 +2849,7 @@ impl WisprFlowGui {
                                 Icon::Flatline,
                                 12.0,
                                 Color32::from_rgb(100, 116, 139),
-                                &tr(
+                                tr(
                                     lang,
                                     "No recent transcriptions yet. Dictate anywhere to see activity.",
                                 ),
@@ -2916,7 +2916,7 @@ impl WisprFlowGui {
                                         Color32::TRANSPARENT,
                                         SURFACE_LINE,
                                         MUTED,
-                                        &tr(lang, "Copy"),
+                                        tr(lang, "Copy"),
                                     ) {
                                         if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                             let _ = clipboard.set_text(&item.formatted_text);
