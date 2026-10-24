@@ -85,12 +85,16 @@ or `raw`.
 - **Auto-start** at login (Windows registry `Run` key / XDG autostart entry).
 - **Diagnostics** — rotating log files plus a panic hook, so a crash is
   reproducible by the user instead of vanishing.
-- **In-app update checker** — a dedicated **update button in the top-right of
-  every tab**, a full **🔄 Updates** page in the sidebar, a clickable version
-  indicator and a *Check for updates* entry in the system tray. It queries the GitHub release
-  feed, shows the new version with release notes, and links to the right
-  installer for your platform. Checks also run in the background every 15
-  minutes while the app is open.
+- **In-app updater** — a dedicated **update button in the top-right of
+  every tab**, a full **Updates** page in the sidebar, a clickable version
+  indicator and a *Check for updates* entry in the system tray. It queries the
+  GitHub release feed, shows the new version with release notes, and links to
+  the right installer for your platform. The check also keeps running in the
+  background while the app is open, at the interval set in Settings (default:
+  hourly at minimum, 24 hours out of the box). New releases are installed
+  automatically by default: the file is downloaded, verified against the
+  release checksum, and only then applied — and never in the middle of a
+  dictation. Turn it off with *Install new versions automatically*.
 
 ---
 
@@ -108,6 +112,23 @@ To build it yourself you need [Inno Setup 6](https://jrsoftware.org/isinfo.php):
 ```powershell
 cargo build --release
 iscc installer.iss
+```
+
+`installer.iss` carries an `@VERSION@` placeholder, so `iscc` alone produces an
+installer named `Wflow-Setup-@VERSION@.exe`. To build a release properly, let
+the script fill it in from `Cargo.toml`:
+
+```powershell
+.\scripts\release.ps1                  # build + installer for the current version
+.\scripts\release.ps1 -Bump patch      # 0.3.10 -> 0.3.11 first
+.\scripts\release.ps1 -Bump patch -Commit -Tag
+```
+
+The same script exists for Linux and macOS, where it drives the packaging
+under `packaging/linux`:
+
+```bash
+./scripts/release.sh --bump patch
 ```
 
 ### Linux

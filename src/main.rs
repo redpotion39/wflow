@@ -18,6 +18,7 @@ use wflow::proto::*;
 use wflow::stt::{pcm_to_wav, transcribe_elevenlabs, transcribe_groq, SttProvider};
 use wflow::text::replace_case_insensitive;
 use wflow::ui::DictationStatus;
+use wflow::update::UpdateInfo;
 
 const TICK_INTERVAL: Duration = Duration::from_millis(30);
 const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -101,6 +102,8 @@ fn main() -> Result<()> {
             config.include_prerelease,
         );
     }
+    // Keep looking while the app is running, not only right after a start.
+    spawn_update_watchdog(&runtime_handle, app_state.clone());
 
     let db_worker = Arc::clone(&db);
     let worker_handle = runtime_handle.clone();
@@ -298,13 +301,168 @@ fn load_app_icon() -> Option<eframe::egui::IconData> {
     })
 }
 
-/// Runs an update check in the background and publishes the result to the GUI.
-/// Starts a background update check.
+/// Queries GitHub Releases and publishes the result to the GUI.
 ///
-/// The check runs on the application's long-lived Tokio runtime. This matters:
-/// the shared `reqwest::Client` binds its connection pool to the runtime that
-/// first creates it, so running the check on a throw-away runtime would leave
-/// the pool pointing at a dead runtime and every later request would hang.
+/// Shared by the manual button, the start-up check and the background
+/// watchdog. It runs on the application's long-lived Tokio runtime. This
+/// matters: the shared `reqwest::Client` binds its connection pool to the
+/// runtime that first creates it, so running the check on a throw-away runtime
+/// would leave the pool pointing at a dead runtime and every later request
+/// would hang.
+async fn perform_update_check(state: &AppState, include_prerelease: bool) {
+    let result = wflow::update::check(include_prerelease).await;
+    match result {
+        Ok(info) => {
+            if let Ok(mut lock) = state.update_info.lock() {
+                *lock = info;
+            }
+            if let Ok(mut lock) = state.update_error.lock() {
+                *lock = None;
+            }
+        }
+        Err(err) => {
+            warn!("Update check failed: {err:#}");
+            if let Ok(mut lock) = state.update_error.lock() {
+                *lock = Some(format!("{err:#}"));
+            }
+        }
+    }
+
+    if let Ok(mut cfg) = state.config.lock() {
+        cfg.last_update_check = Some(wflow::update::now_rfc3339());
+        if let Err(err) = cfg.save(None) {
+            warn!("Could not persist last update check: {}", err);
+        }
+    }
+
+    request_repaint(state);
+}
+
+/// True when the release carries something this platform can install on its
+/// own, and can verify it.
+///
+/// Windows cannot replace a running `.exe`, so it installs the Inno Setup
+/// build; the other platforms swap the binary in place. A release without a
+/// checksum manifest is never installed silently — that path would only fail.
+fn has_installable_asset(info: &UpdateInfo) -> bool {
+    if info.checksums_url.is_none() {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        info.windows_setup_url.is_some()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        wflow::updater::install_asset(info).is_some()
+    }
+}
+
+/// Which version may be installed without the user asking for it.
+///
+/// Only the parts that can go wrong are guarded: a dictation in flight is
+/// never interrupted, an update the user explicitly skipped is never pushed
+/// again, and a release with no asset for this platform is never attempted.
+fn auto_update_target(state: &AppState) -> Option<UpdateInfo> {
+    let info = state
+        .update_info
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())?;
+    if !info.is_newer() {
+        return None;
+    }
+
+    let cfg = state.config.lock().ok()?;
+    if !cfg.check_updates || !cfg.auto_update {
+        return None;
+    }
+    let skipped = cfg.skipped_update_version.clone();
+    drop(cfg);
+
+    if skipped.as_deref() == Some(info.latest.to_string().as_str()) {
+        return None;
+    }
+    // Nothing to install means the button would open a browser instead.
+    if !has_installable_asset(&info) {
+        return None;
+    }
+    // Never replace the executable while the user is speaking.
+    if state.is_recording.load(Ordering::SeqCst) {
+        return None;
+    }
+    let busy = match state.status.lock() {
+        Ok(status) => !matches!(
+            *status,
+            DictationStatus::Idle | DictationStatus::Done | DictationStatus::Error
+        ),
+        Err(_) => true,
+    };
+    if busy {
+        return None;
+    }
+    Some(info)
+}
+
+/// Keeps checking for releases for as long as the app runs.
+///
+/// Wflow lives in the tray and can go weeks without a restart, so a check that
+/// only happens at start-up would miss every release published while it was
+/// running. This re-reads the settings on every pass, so changing the interval
+/// or turning the feature off takes effect without a restart.
+fn spawn_update_watchdog(runtime: &tokio::runtime::Handle, state: AppState) {
+    runtime.spawn(async move {
+        // Wakes once a minute; the configured interval decides whether that
+        // pass actually talks to GitHub.
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The first tick fires immediately and would race the start-up check.
+        ticker.tick().await;
+
+        loop {
+            ticker.tick().await;
+
+            let (enabled, due, include_prerelease) = {
+                let Ok(cfg) = state.config.lock() else {
+                    continue;
+                };
+                (
+                    cfg.check_updates,
+                    wflow::update::should_check(
+                        cfg.last_update_check.as_deref(),
+                        cfg.update_check_interval_hours,
+                    ),
+                    cfg.include_prerelease,
+                )
+            };
+            if !enabled || !due {
+                continue;
+            }
+            if state.update_check_running.swap(true, Ordering::SeqCst) {
+                // A manual check is already on the wire.
+                continue;
+            }
+
+            perform_update_check(&state, include_prerelease).await;
+            state.update_check_running.store(false, Ordering::SeqCst);
+
+            let Some(info) = auto_update_target(&state) else {
+                continue;
+            };
+            info!(
+                "Auto-update: installing v{} in the background.",
+                info.latest
+            );
+            state.set_toast(&format!(
+                "พบเวอร์ชันใหม่ v{} กำลังอัปเดตให้อัตโนมัติ",
+                info.latest
+            ));
+            install_pending_update(&state, info).await;
+        }
+    });
+}
+
+/// Runs an update check in the background and publishes the result to the GUI.
 fn spawn_update_check(runtime: &tokio::runtime::Handle, state: AppState, include_prerelease: bool) {
     if state.update_check_running.swap(true, Ordering::SeqCst) {
         return;
@@ -312,45 +470,52 @@ fn spawn_update_check(runtime: &tokio::runtime::Handle, state: AppState, include
 
     let state = state.clone();
     runtime.spawn(async move {
-        let result = wflow::update::check(include_prerelease).await;
-        match result {
-            Ok(info) => {
-                if let Ok(mut lock) = state.update_info.lock() {
-                    *lock = info;
-                }
-                if let Ok(mut lock) = state.update_error.lock() {
-                    *lock = None;
-                }
-            }
-            Err(err) => {
-                warn!("Update check failed: {err:#}");
-                if let Ok(mut lock) = state.update_error.lock() {
-                    *lock = Some(format!("{err:#}"));
-                }
-            }
-        }
-
-        if let Ok(mut cfg) = state.config.lock() {
-            cfg.last_update_check = Some(wflow::update::now_rfc3339());
-            if let Err(err) = cfg.save(None) {
-                warn!("Could not persist last update check: {}", err);
-            }
-        }
-
+        perform_update_check(&state, include_prerelease).await;
         state.update_check_running.store(false, Ordering::SeqCst);
-        if let Ok(lock) = state.egui_ctx.lock() {
-            if let Some(ctx) = lock.as_ref() {
-                ctx.request_repaint();
-            }
-        }
     });
 }
 
-/// Downloads, verifies and installs the pending update, then restarts.
+/// Downloads, verifies and installs `info`, then restarts.
 ///
 /// The installation replaces the running executable, so the app has to quit
 /// afterwards; a helper process that is waiting for the current PID starts
-/// the new build once the lock file is free again.
+/// the new build once the lock file is free again. Shared by the "Install"
+/// button and the auto-update watchdog.
+async fn install_pending_update(state: &AppState, info: UpdateInfo) {
+    // Never install two updates at the same time.
+    {
+        let Ok(mut install) = state.update_install.lock() else {
+            return;
+        };
+        if install.is_running() {
+            return;
+        }
+        install.stage = wflow::updater::InstallStage::Downloading;
+        install.percent = 0;
+        install.message = "กำลังดาวน์โหลดอัปเดต...".to_string();
+    }
+
+    let result = wflow::updater::install_update(&info, &state.update_install, true).await;
+    match result {
+        Ok(()) => {
+            info!("Update to v{} installed successfully.", info.latest);
+            state.set_toast(&format!("ติดตั้ง v{} แล้ว กำลังเริ่มใหม่", info.latest));
+            // Quit so the helper can start the new build.
+            state.pending_quit.store(true, Ordering::SeqCst);
+        }
+        Err(err) => {
+            warn!("Update installation failed: {err:#}");
+            if let Ok(mut install) = state.update_install.lock() {
+                install.stage = wflow::updater::InstallStage::Failed;
+                install.message = format!("{err:#}");
+            }
+            state.set_toast(&format!("ติดตั้งอัปเดตไม่สำเร็จ: {err:#}"));
+        }
+    }
+    request_repaint(state);
+}
+
+/// Installs the pending update from a GUI click.
 fn spawn_update_install(runtime: &tokio::runtime::Handle, state: AppState) {
     let Some(info) = state
         .update_info
@@ -363,40 +528,8 @@ fn spawn_update_install(runtime: &tokio::runtime::Handle, state: AppState) {
         return;
     };
 
-    // Never install two updates at the same time.
-    {
-        let mut install = state
-            .update_install
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if install.is_running() {
-            return;
-        }
-        install.stage = wflow::updater::InstallStage::Downloading;
-        install.percent = 0;
-        install.message = "กำลังดาวน์โหลดอัปเดต...".to_string();
-    }
-
-    let state = state.clone();
     runtime.spawn(async move {
-        let result = wflow::updater::install_update(&info, &state.update_install, true).await;
-        match result {
-            Ok(()) => {
-                info!("Update to v{} installed successfully.", info.latest);
-                state.set_toast(&format!("ติดตั้ง v{} แล้ว กำลังเริ่มใหม่", info.latest));
-                // Quit so the helper can start the new build.
-                state.pending_quit.store(true, Ordering::SeqCst);
-            }
-            Err(err) => {
-                warn!("Update installation failed: {err:#}");
-                if let Ok(mut install) = state.update_install.lock() {
-                    install.stage = wflow::updater::InstallStage::Failed;
-                    install.message = format!("{err:#}");
-                }
-                state.set_toast(&format!("ติดตั้งอัปเดตไม่สำเร็จ: {err:#}"));
-            }
-        }
-        request_repaint(&state);
+        install_pending_update(&state, info).await;
     });
 }
 
