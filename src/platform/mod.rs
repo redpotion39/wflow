@@ -17,7 +17,10 @@ pub use keys::vk_to_string;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-#[cfg(target_os = "windows")]
+// Under `mock_check` the stub is the crate's platform, so the native backend
+// must not re-export its types as well: two glob exports of `PlatformManager`
+// and `ActiveAppContext` make every use of them ambiguous.
+#[cfg(all(target_os = "windows", not(feature = "mock_check")))]
 pub use windows::*;
 
 #[cfg(all(target_os = "linux", not(feature = "mock_check")))]

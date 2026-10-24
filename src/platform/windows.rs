@@ -443,13 +443,15 @@ impl PlatformManager {
 
             HUD_HWND.store(hud_hwnd.0 as isize, Ordering::SeqCst);
 
-            let mut nid = NOTIFYICONDATAW::default();
-            nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-            nid.hWnd = hwnd;
-            nid.uID = 1001;
-            nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-            nid.uCallbackMessage = WM_TRAY_CALLBACK;
-            nid.hIcon = Self::get_app_icon(1);
+            let mut nid = NOTIFYICONDATAW {
+                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: hwnd,
+                uID: 1001,
+                uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+                uCallbackMessage: WM_TRAY_CALLBACK,
+                hIcon: Self::get_app_icon(1),
+                ..Default::default()
+            };
 
             let tip = format!(
                 "Wflow\n{}: Dictate | {}: Toggle Window\0",
@@ -583,7 +585,7 @@ impl PlatformManager {
                 return None;
             }
 
-            let mask_bytes_len = (((width + 15) / 16) * 2 * height) as usize;
+            let mask_bytes_len = (width.div_ceil(16) * 2 * height) as usize;
             let mask_data = vec![0u8; mask_bytes_len];
             let hbm_mask = CreateBitmap(
                 width as i32,
@@ -597,7 +599,7 @@ impl PlatformManager {
                 return None;
             }
 
-            let mut icon_info = ICONINFO {
+            let icon_info = ICONINFO {
                 fIcon: true.into(),
                 xHotspot: 0,
                 yHotspot: 0,
@@ -605,7 +607,7 @@ impl PlatformManager {
                 hbmColor: hbm_color,
             };
 
-            let hicon = CreateIconIndirect(&mut icon_info).ok();
+            let hicon = CreateIconIndirect(&icon_info).ok();
 
             let _ = DeleteObject(hbm_color);
             let _ = DeleteObject(hbm_mask);
@@ -630,7 +632,7 @@ impl PlatformManager {
                     LR_DEFAULTCOLOR,
                 ) {
                     let icon = HICON(handle.0);
-                    if !icon.is_invalid() && icon.0 != std::ptr::null_mut() {
+                    if !icon.is_invalid() {
                         return icon;
                     }
                 }
@@ -638,7 +640,7 @@ impl PlatformManager {
                     hmodule,
                     windows::core::PCWSTR(resource_id as usize as *const u16),
                 ) {
-                    if !icon.is_invalid() && icon.0 != std::ptr::null_mut() {
+                    if !icon.is_invalid() {
                         return icon;
                     }
                 }
@@ -685,13 +687,14 @@ impl PlatformManager {
             let val = TRAY_HWND.load(Ordering::SeqCst);
             if val != 0 {
                 let hwnd = HWND(val as *mut core::ffi::c_void);
-                let mut nid = NOTIFYICONDATAW::default();
-                nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-                nid.hWnd = hwnd;
-                nid.uID = 1001;
-                nid.uFlags = NIF_ICON;
-                let icon_id = if is_recording { 2 } else { 1 };
-                nid.hIcon = Self::get_app_icon(icon_id);
+                let nid = NOTIFYICONDATAW {
+                    cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                    hWnd: hwnd,
+                    uID: 1001,
+                    uFlags: NIF_ICON,
+                    hIcon: Self::get_app_icon(if is_recording { 2 } else { 1 }),
+                    ..Default::default()
+                };
                 let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
             }
         }
@@ -737,11 +740,13 @@ impl PlatformManager {
             let val = TRAY_HWND.load(Ordering::SeqCst);
             if val != 0 {
                 let hwnd = HWND(val as *mut core::ffi::c_void);
-                let mut nid = NOTIFYICONDATAW::default();
-                nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-                nid.hWnd = hwnd;
-                nid.uID = 1001;
-                nid.uFlags = NIF_TIP;
+                let mut nid = NOTIFYICONDATAW {
+                    cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                    hWnd: hwnd,
+                    uID: 1001,
+                    uFlags: NIF_TIP,
+                    ..Default::default()
+                };
 
                 let tip = format!(
                     "Wflow\n{}: Dictate | {}: Toggle Window\0",
@@ -824,7 +829,7 @@ impl PlatformManager {
             // 1. Try FindWindowW by title
             let title = windows::core::w!("Wflow - AI Voice Studio");
             if let Ok(h) = FindWindowW(None, title) {
-                if !h.is_invalid() && h.0 != std::ptr::null_mut() {
+                if !h.is_invalid() {
                     return Some(h);
                 }
             }
@@ -980,11 +985,7 @@ unsafe extern "system" fn tray_wnd_proc(
                 );
 
                 let is_autostart = PlatformManager::is_autostart_enabled();
-                let autostart_str = if is_autostart {
-                    "Start Wflow on Windows Startup\0"
-                } else {
-                    "Start Wflow on Windows Startup\0"
-                };
+                let autostart_str = "Start Wflow on Windows Startup\0";
                 let autostart_wide: Vec<u16> = autostart_str.encode_utf16().collect();
                 let autostart_flags = MF_STRING
                     | if is_autostart {
@@ -1024,7 +1025,7 @@ unsafe extern "system" fn tray_wnd_proc(
                             let _ = tx.send(HotkeyEvent::QuitApp);
                         }
                     }
-                    let _ = PostQuitMessage(0);
+                    PostQuitMessage(0);
                 } else if cmd.0 == 5 {
                     if let Ok(guard) = HOOK_TX.lock() {
                         if let Some(tx) = guard.as_ref() {
@@ -1051,7 +1052,7 @@ unsafe extern "system" fn tray_wnd_proc(
                 let _ = tx.send(HotkeyEvent::QuitApp);
             }
         }
-        let _ = PostQuitMessage(0);
+        PostQuitMessage(0);
         return LRESULT(0);
     }
     if msg == WM_QUERYENDSESSION {

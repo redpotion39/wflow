@@ -104,7 +104,7 @@ pub fn play_sound(effect: SoundEffect) {
 
         #[cfg(target_os = "windows")]
         unsafe {
-            // SND_SYNC = 0x0000, SND_NODEFAULT = 0x0002, SND_MEMORY = 0x0004
+            // SND_NODEFAULT = 0x0002, SND_MEMORY = 0x0004 (SND_SYNC is 0).
             #[link(name = "winmm")]
             extern "system" {
                 fn PlaySoundW(
@@ -113,7 +113,7 @@ pub fn play_sound(effect: SoundEffect) {
                     fdwSound: u32,
                 ) -> i32;
             }
-            let _ = PlaySoundW(wav.as_ptr(), std::ptr::null_mut(), 0x0000 | 0x0002 | 0x0004);
+            let _ = PlaySoundW(wav.as_ptr(), std::ptr::null_mut(), 0x0002 | 0x0004);
         }
 
         #[cfg(not(target_os = "windows"))]
