@@ -31,10 +31,38 @@ fn main() {
             let minor = parts.next().unwrap_or("0");
             let patch = parts.next().unwrap_or("0");
 
+            // Application manifest: declares Per-Monitor-V2 DPI awareness so
+            // the UI stays sharp and correctly sized on HiDPI laptop screens
+            // (Windows display scaling 125%–200%). Without it the process is
+            // DPI-unaware and Windows bitmap-stretches the windows (blurry).
+            let manifest_xml = format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="Wflow" version="{major}.{minor}.{patch}.0" processorArchitecture="*"/>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>
+"#,
+            );
+            let manifest_path = out_dir.join("wflow.manifest");
+            std::fs::write(&manifest_path, &manifest_xml).unwrap();
+            let manifest_rc_path =
+                format!("{}", manifest_path.display()).replace('\\', "\\\\");
+
             let rc_content = format!(
                 r#"
 1 ICON "{}"
 2 ICON "{}"
+1 24 "{}"
 1 VERSIONINFO
 FILEVERSION {major},{minor},{patch},0
 PRODUCTVERSION {major},{minor},{patch},0
@@ -62,7 +90,7 @@ BEGIN
     END
 END
 "#,
-                app_icon_path, rec_icon_path
+                app_icon_path, rec_icon_path, manifest_rc_path
             );
 
             std::fs::write(&rc_path, rc_content).unwrap();
@@ -93,6 +121,7 @@ END
                 let mut res = winres::WindowsResource::new();
                 res.set_icon("assets/app_icon.ico");
                 res.set_icon_with_id("assets/tray_icon_rec.ico", "2");
+                res.set_manifest(&manifest_xml);
                 let _ = res.compile();
             }
         }

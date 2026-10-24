@@ -86,9 +86,9 @@ impl ksni::Tray for WflowTray {
             MenuItem::Separator,
             StandardItem {
                 label: if is_rec {
-                    "⏹️ หยุดบันทึกเสียง (Stop Dictation)".into()
+                    "หยุดบันทึกเสียง (Stop Dictation)".into()
                 } else {
-                    "🎙️ เริ่มบันทึกเสียง (Start Dictation)".into()
+                    "เริ่มบันทึกเสียง (Start Dictation)".into()
                 },
                 icon_name: if is_rec {
                     "media-playback-stop".into()
@@ -107,7 +107,7 @@ impl ksni::Tray for WflowTray {
             .into(),
             MenuItem::Separator,
             StandardItem {
-                label: "🔄 ตรวจสอบอัปเดต (Check for Updates)".into(),
+                label: "ตรวจสอบอัปเดต (Check for Updates)".into(),
                 icon_name: "emblem-system-software-update".into(),
                 activate: Box::new(move |_| {
                     let _ = tx4.send(HotkeyEvent::CheckUpdate);
@@ -117,7 +117,7 @@ impl ksni::Tray for WflowTray {
             .into(),
             MenuItem::Separator,
             StandardItem {
-                label: "🔴 ปิดโปรแกรม (Quit Wflow)".into(),
+                label: "ปิดโปรแกรม (Quit Wflow)".into(),
                 icon_name: "application-exit".into(),
                 activate: Box::new(move |_| {
                     // Ask the coordinator to shut down gracefully so the

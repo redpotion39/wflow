@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use crate::config::{AppConfig, KeyCombo};
 use crate::db::{DictionaryEntry, HistoryRecord};
 use crate::i18n::{tr, Lang};
+use crate::icons::Icon;
 use crate::platform::{ActiveAppContext, PlatformManager};
 use crate::stt::SttProvider;
 use crate::thai::shape_thai;
@@ -70,6 +71,181 @@ pub enum GuiEvent {
 /// visible hierarchy between titles and body copy.
 fn heading(size: f32) -> FontId {
     FontId::new(size, egui::FontFamily::Name("Heading".into()))
+}
+
+/// Muted label colour used by section headings and secondary copy.
+const MUTED: Color32 = Color32::from_rgb(148, 163, 184);
+/// Card surface and border, shared by every panel on the studio screen.
+const SURFACE: Color32 = Color32::from_rgb(19, 24, 38);
+const SURFACE_LINE: Color32 = Color32::from_rgb(35, 45, 68);
+
+/// Draws a line icon and a label side by side.
+///
+/// Replaces the emoji that used to prefix these labels: emoji render with a
+/// different colour and shape on every machine and compete with the text for
+/// attention, while a monochrome line icon reads as part of the interface.
+fn icon_label(ui: &mut egui::Ui, icon: Icon, size: f32, color: Color32, text: &str, font: FontId) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+        crate::icons::draw(ui.painter(), rect.center(), size, color, icon);
+        ui.label(egui::RichText::new(text).font(font).color(color));
+    });
+}
+
+/// A small pill: rounded background with an icon and text inside.
+#[allow(clippy::too_many_arguments)]
+fn icon_pill(
+    ui: &mut egui::Ui,
+    icon: Option<Icon>,
+    text: &str,
+    fg: Color32,
+    bg: Color32,
+    size: f32,
+    font: FontId,
+) {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font.clone(), fg);
+    let icon_w = if icon.is_some() { size + 6.0 } else { 0.0 };
+    let pad_x = 9.0;
+    let (rect, _) = ui.allocate_exact_size(
+        Vec2::new(galley.size().x + icon_w + pad_x * 2.0, galley.size().y + 8.0),
+        Sense::hover(),
+    );
+    ui.painter()
+        .rect_filled(rect, Rounding::same(rect.height() / 2.0), bg);
+    let mut x = rect.min.x + pad_x;
+    if let Some(ic) = icon {
+        crate::icons::draw(
+            ui.painter(),
+            Pos2::new(x + size / 2.0, rect.center().y),
+            size,
+            fg,
+            ic,
+        );
+        x += size + 6.0;
+    }
+    ui.painter().text(
+        Pos2::new(x, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        font,
+        fg,
+    );
+}
+
+/// A clickable button drawn with a line icon and a label.
+///
+/// Returns `true` when the button was clicked.
+#[allow(clippy::too_many_arguments)]
+fn icon_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    text: &str,
+    height: f32,
+    fill: Color32,
+    stroke_color: Color32,
+    fg: Color32,
+    font: FontId,
+    icon_size: f32,
+    centered: bool,
+) -> bool {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());
+    let rect = rect.shrink(0.5);
+
+    let bg = if response.dragged() {
+        fill
+    } else if response.hovered() {
+        fill.linear_multiply(1.18)
+    } else {
+        fill
+    };
+    let rounding = Rounding::same(10.0);
+    ui.painter().rect_filled(rect, rounding, bg);
+    ui.painter().rect_stroke(
+        rect,
+        rounding,
+        Stroke::new(1.0_f32, if response.hovered() { fg } else { stroke_color }),
+    );
+
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font.clone(), fg);
+    let group_w = icon_size + 9.0 + galley.size().x;
+    let start_x = if centered {
+        rect.center().x - group_w / 2.0
+    } else {
+        rect.min.x + 14.0
+    };
+
+    crate::icons::draw(
+        ui.painter(),
+        Pos2::new(start_x + icon_size / 2.0, rect.center().y),
+        icon_size,
+        fg,
+        icon,
+    );
+    ui.painter().text(
+        Pos2::new(start_x + icon_size + 9.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        font,
+        fg,
+    );
+
+    response.clicked()
+}
+
+/// A compact clickable button that is only an icon (row actions, toolbars).
+fn icon_button_small(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    size: f32,
+    fill: Color32,
+    stroke_color: Color32,
+    fg: Color32,
+    tooltip: &str,
+) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let rect = rect.shrink(0.5);
+    let bg = if response.hovered() {
+        fill.linear_multiply(1.35)
+    } else {
+        fill
+    };
+    ui.painter()
+        .rect_filled(rect, Rounding::same(7.0), bg);
+    ui.painter().rect_stroke(
+        rect,
+        Rounding::same(7.0),
+        Stroke::new(1.0_f32, if response.hovered() { fg } else { stroke_color }),
+    );
+    crate::icons::draw(ui.painter(), rect.center(), size * 0.52, fg, icon);
+    if response.hovered() && !tooltip.is_empty() {
+        response.clone().show_tooltip_text(tooltip);
+    }
+    response.clicked()
+}
+
+/// True when a font file carries the WTT 2.0 PUA glyphs (0xF700..0xF71A) that
+/// `thai::shape_thai` maps Thai vowels and tone marks onto.
+///
+/// The shaping only helps fonts that actually own those glyphs — the TLWG
+/// family on Linux. Noto Sans Thai, the font `fc-match :lang=th` usually
+/// returns, does not have them, and neither does Leelawadee UI or Tahoma on
+/// Windows. Asking the real file is the only way to know, because the answer
+/// decides whether shaping fixes "สระลอย" or turns the whole interface into
+/// tofu boxes.
+fn font_has_thai_pua(bytes: &[u8]) -> bool {
+    use ab_glyph::Font as _;
+    let Ok(font) = ab_glyph::FontArc::try_from_vec(bytes.to_vec()) else {
+        return false;
+    };
+    // The block is either present in full or absent; probing every entry is
+    // still cheap (27 lookups) and avoids guessing.
+    ('\u{F700}'..='\u{F71A}').all(|c| font.glyph_id(c) != ab_glyph::GlyphId(0))
 }
 
 /// Fills the single `{}` of a translated template.
@@ -225,6 +401,7 @@ pub struct WisprFlowGui {
     clear_history_armed: bool,
     // Update checker
     settings_check_updates: bool,
+    settings_auto_update: bool,
     settings_include_prerelease: bool,
     settings_update_interval_hours: u64,
     // Features 1, 2, 3, 5: AI Formatting, Writing Style, Sound Effects, Mic, Trigger Mode
@@ -351,6 +528,7 @@ impl WisprFlowGui {
             autocorrect_languages,
             mixed_spacing,
             check_updates,
+            auto_update,
             include_prerelease,
             update_interval_hours,
         ) = {
@@ -391,6 +569,7 @@ impl WisprFlowGui {
                 cfg.autocorrect_languages.clone(),
                 cfg.mixed_spacing,
                 cfg.check_updates,
+                cfg.auto_update,
                 cfg.include_prerelease,
                 cfg.update_check_interval_hours,
             )
@@ -435,6 +614,7 @@ impl WisprFlowGui {
             settings_mixed_spacing: mixed_spacing,
             clear_history_armed: false,
             settings_check_updates: check_updates,
+            settings_auto_update: auto_update,
             settings_include_prerelease: include_prerelease,
             settings_update_interval_hours: update_interval_hours,
             settings_ai_formatting: ai_formatting,
@@ -467,6 +647,9 @@ impl WisprFlowGui {
         let mut loaded_cjk = false;
         let loaded_emoji = true;
         let mut loaded_bold = false;
+        // Set from the font files themselves: Thai PUA shaping is only safe
+        // when the face that will draw the text owns those glyphs.
+        let mut thai_pua = false;
 
         // 1. Primary UI Latin font (Segoe UI on Windows, Ubuntu/Liberation/DejaVu on Linux)
         #[cfg(target_os = "windows")]
@@ -477,6 +660,7 @@ impl WisprFlowGui {
             for path in &segoe_candidates {
                 if path.exists() {
                     if let Ok(bytes) = std::fs::read(path) {
+                        thai_pua |= font_has_thai_pua(&bytes);
                         fonts
                             .font_data
                             .insert("primary_ui".to_owned(), egui::FontData::from_owned(bytes));
@@ -536,6 +720,7 @@ impl WisprFlowGui {
             for path in candidates {
                 if path.exists() {
                     if let Ok(bytes) = std::fs::read(&path) {
+                        thai_pua |= font_has_thai_pua(&bytes);
                         fonts
                             .font_data
                             .insert("primary_ui".to_owned(), egui::FontData::from_owned(bytes));
@@ -560,6 +745,9 @@ impl WisprFlowGui {
             for path in &thai_candidates {
                 if path.exists() {
                     if let Ok(bytes) = std::fs::read(path) {
+                        // Leelawadee UI and Tahoma have no PUA block, so this
+                        // is the check that stops shaping on Windows.
+                        thai_pua |= font_has_thai_pua(&bytes);
                         fonts
                             .font_data
                             .insert("thai_font".to_owned(), egui::FontData::from_owned(bytes));
@@ -617,6 +805,7 @@ impl WisprFlowGui {
                         // Thai text sit visually lower than the Latin text on
                         // the same line. A small scale + upward shift lines
                         // the two scripts up.
+                        thai_pua |= font_has_thai_pua(&bytes);
                         let thai = egui::FontData::from_owned(bytes).tweak(egui::FontTweak {
                             scale: 0.96,
                             y_offset_factor: -0.08,
@@ -793,6 +982,12 @@ impl WisprFlowGui {
                 family.push("emoji_font".to_owned());
             }
         }
+
+        // Decide once, from the fonts that are actually installed, whether the
+        // PUA shaping is safe. Getting this wrong is what produced tofu boxes
+        // for every Thai vowel on machines without a TLWG font.
+        crate::thai::set_pua_support(thai_pua);
+        tracing::info!("Thai PUA shaping enabled: {}", thai_pua);
 
         if loaded_primary || loaded_thai || loaded_cjk {
             ctx.set_fonts(fonts);
@@ -1123,7 +1318,7 @@ fn update_button_style(
         // Gentle pulse so the action is impossible to miss.
         let pulse = 0.5 + 0.5 * (animation_time * 3.0).sin();
         return (
-            format!("⬆️  {}", tr1(lang, "New update v{}", latest)),
+            format!("↑  {}", tr1(lang, "New update v{}", latest)),
             Color32::from_rgb(22, 163, 74),
             Color32::from_rgb(74, 222, 128).gamma_multiply(0.65 + 0.35 * pulse),
             Color32::WHITE,
@@ -1131,14 +1326,14 @@ fn update_button_style(
     }
     if running {
         return (
-            format!("⏳  {}", tr(lang, "Checking...")),
+            format!("·  {}", tr(lang, "Checking...")),
             Color32::from_rgb(30, 41, 59),
             Color32::from_rgb(100, 116, 139),
             Color32::from_rgb(203, 213, 225),
         );
     }
     (
-        format!("🔄  {}", tr1(lang, "Update · v{}", current_version)),
+        format!("↻  {}", tr1(lang, "Update · v{}", current_version)),
         Color32::from_rgb(30, 41, 59),
         Color32::from_rgb(71, 85, 105),
         Color32::from_rgb(203, 213, 225),
@@ -1236,12 +1431,12 @@ impl WisprFlowGui {
                         Rounding::same(9.0),
                         Color32::from_rgb(49, 46, 129),
                     );
-                    ui.painter().text(
+                    crate::icons::draw(
+                        ui.painter(),
                         logo_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "🎙️",
-                        FontId::proportional(16.0),
+                        17.0,
                         Color32::WHITE,
+                        Icon::Mic,
                     );
                 }
 
@@ -1288,26 +1483,26 @@ impl WisprFlowGui {
             let update_badge = self.pending_update().is_some();
 
             let nav_items = [
-                (ActiveTab::Studio, "🎙️", tr(lang, "Live Studio"), None),
+                (ActiveTab::Studio, Icon::Mic, tr(lang, "Live Studio"), None),
                 (
                     ActiveTab::History,
-                    "📜",
+                    Icon::History,
                     tr(lang, "History"),
                     Some(history_count),
                 ),
                 (
                     ActiveTab::Dictionary,
-                    "📖",
+                    Icon::Book,
                     tr(lang, "Dictionary"),
                     Some(dict_count),
                 ),
                 (
                     ActiveTab::Updates,
-                    "🔄",
+                    Icon::Download,
                     tr(lang, "Updates"),
                     if update_badge { Some(1) } else { None },
                 ),
-                (ActiveTab::Settings, "⚙️", tr(lang, "Settings"), None),
+                (ActiveTab::Settings, Icon::Gear, tr(lang, "Settings"), None),
             ];
 
             for (tab, icon, label, count) in nav_items {
@@ -1339,13 +1534,17 @@ impl WisprFlowGui {
                     );
                 }
 
-                let icon_pos = Pos2::new(btn_rect.min.x + 12.0, btn_rect.center().y);
-                ui.painter().text(
+                let icon_pos = Pos2::new(btn_rect.min.x + 19.0, btn_rect.center().y);
+                crate::icons::draw(
+                    ui.painter(),
                     icon_pos,
-                    egui::Align2::LEFT_CENTER,
+                    16.0,
+                    if is_active {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_rgb(148, 163, 184)
+                    },
                     icon,
-                    FontId::proportional(15.0),
-                    Color32::WHITE,
                 );
 
                 let text_pos = Pos2::new(btn_rect.min.x + 38.0, btn_rect.center().y);
@@ -1408,38 +1607,38 @@ impl WisprFlowGui {
                 ui.add_space(6.0);
 
                 // 1. Explicit Exit Button
-                let exit_btn = egui::Button::new(
-                    egui::RichText::new(shape_thai(&format!("🔴 {}", tr(lang, "Exit"))))
-                        .font(FontId::proportional(11.5))
-                        .color(Color32::from_rgb(252, 165, 165))
-                        .strong(),
-                )
-                .fill(Color32::from_rgb(45, 18, 22))
-                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(185, 28, 28)))
-                .rounding(Rounding::same(7.0))
-                .min_size(Vec2::new(ui.available_width(), 30.0));
-
-                if ui.add(exit_btn).clicked() {
+                if icon_button(
+                    ui,
+                    Icon::Power,
+                    &shape_thai(tr(lang, "Exit")).to_string(),
+                    30.0,
+                    Color32::from_rgb(45, 18, 22),
+                    Color32::from_rgb(185, 28, 28),
+                    Color32::from_rgb(252, 165, 165),
+                    FontId::proportional(11.5),
+                    13.0,
+                    false,
+                ) {
                     self.show_exit_confirmation = true;
                 }
 
                 ui.add_space(4.0);
 
                 // 2. Minimize Button
-                let hide_btn = egui::Button::new(
-                    egui::RichText::new(shape_thai(&format!(
-                        "📌 {}",
-                        tr1(lang, "Minimize ({})", toggle_key_name)
-                    )))
-                    .font(FontId::proportional(11.5))
-                    .color(Color32::from_rgb(203, 213, 225)),
-                )
-                .fill(Color32::from_rgb(22, 29, 44))
-                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(38, 50, 74)))
-                .rounding(Rounding::same(7.0))
-                .min_size(Vec2::new(ui.available_width(), 34.0));
-
-                if ui.add(hide_btn).clicked() {
+                let minimize_label =
+                    shape_thai(&tr1(lang, "Minimize ({})", toggle_key_name)).to_string();
+                if icon_button(
+                    ui,
+                    Icon::Collapse,
+                    &minimize_label,
+                    34.0,
+                    Color32::from_rgb(22, 29, 44),
+                    Color32::from_rgb(38, 50, 74),
+                    Color32::from_rgb(203, 213, 225),
+                    FontId::proportional(11.5),
+                    13.0,
+                    false,
+                ) {
                     #[cfg(target_os = "windows")]
                     crate::platform::windows::PlatformManager::hide_main_window();
                     #[cfg(not(target_os = "windows"))]
@@ -1476,15 +1675,21 @@ impl WisprFlowGui {
                             let (prov_badge, mic_label) = {
                                 let cfg = lock(&self.state.config);
                                 let prov_badge = match cfg.stt_provider {
-                                    SttProvider::WisprFlow => {
-                                        ("⚡ Wispr Flow", Color32::from_rgb(129, 140, 248))
-                                    }
-                                    SttProvider::Groq => {
-                                        ("🚀 Groq Whisper", Color32::from_rgb(251, 146, 60))
-                                    }
-                                    SttProvider::ElevenLabs => {
-                                        ("🎙️ ElevenLabs", Color32::from_rgb(192, 132, 252))
-                                    }
+                                    SttProvider::WisprFlow => (
+                                        Icon::Bolt,
+                                        "Wispr Flow",
+                                        Color32::from_rgb(129, 140, 248),
+                                    ),
+                                    SttProvider::Groq => (
+                                        Icon::Activity,
+                                        "Groq Whisper",
+                                        Color32::from_rgb(251, 146, 60),
+                                    ),
+                                    SttProvider::ElevenLabs => (
+                                        Icon::Waveform,
+                                        "ElevenLabs",
+                                        Color32::from_rgb(192, 132, 252),
+                                    ),
                                 };
 
                                 let mic_label = if let Some(ref m) = cfg.input_device_name {
@@ -1509,10 +1714,19 @@ impl WisprFlowGui {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         ui.label(
-                                            egui::RichText::new(prov_badge.0)
+                                            egui::RichText::new(prov_badge.1)
                                                 .font(FontId::proportional(10.5))
-                                                .color(prov_badge.1)
+                                                .color(prov_badge.2)
                                                 .strong(),
+                                        );
+                                        let (icon_rect, _) =
+                                            ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                                        crate::icons::draw(
+                                            ui.painter(),
+                                            icon_rect.center(),
+                                            12.0,
+                                            prov_badge.2,
+                                            prov_badge.0,
                                         );
                                     },
                                 );
@@ -1530,9 +1744,18 @@ impl WisprFlowGui {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         ui.label(
-                                            egui::RichText::new(format!("🎤 {}", mic_label))
+                                            egui::RichText::new(&mic_label)
                                                 .font(FontId::proportional(10.5))
                                                 .color(Color32::from_rgb(203, 213, 225)),
+                                        );
+                                        let (icon_rect, _) =
+                                            ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                                        crate::icons::draw(
+                                            ui.painter(),
+                                            icon_rect.center(),
+                                            12.0,
+                                            Color32::from_rgb(148, 163, 184),
+                                            Icon::Mic,
                                         );
                                     },
                                 );
@@ -1566,7 +1789,7 @@ impl WisprFlowGui {
                             let pending_latest = pending.as_ref().map(|i| i.latest.to_string());
                             let (version_text, version_color) = match pending_latest.as_ref() {
                                 Some(latest) => (
-                                    format!("v{} ⬆️ v{}", crate::update::current_version(), latest),
+                                    format!("v{} ↑ v{}", crate::update::current_version(), latest),
                                     Color32::from_rgb(74, 222, 128),
                                 ),
                                 None => (
@@ -1699,25 +1922,32 @@ impl WisprFlowGui {
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
-            let (title, subtitle) = match self.active_tab {
+            // Each page carries the same glyph as its sidebar entry, so the
+            // icon doubles as a "you are here" cue.
+            let (title_icon, title, subtitle) = match self.active_tab {
                 ActiveTab::Studio => (
-                    format!("🎙️ {}", tr(lang, "Live Speech Studio")),
+                    Icon::Mic,
+                    tr(lang, "Live Speech Studio"),
                     tr(lang, "Zero-latency real-time voice typing"),
                 ),
                 ActiveTab::History => (
-                    format!("📜 {}", tr(lang, "Dictation History")),
+                    Icon::History,
+                    tr(lang, "Dictation History"),
                     tr(lang, "Search, copy, or re-paste past speech"),
                 ),
                 ActiveTab::Dictionary => (
-                    format!("📖 {}", tr(lang, "Custom Vocabulary & Snippets")),
+                    Icon::Book,
+                    tr(lang, "Custom Vocabulary & Snippets"),
                     tr(lang, "Domain terminology and text expansion shortcuts"),
                 ),
                 ActiveTab::Updates => (
-                    format!("🔄 {}", tr(lang, "Software Updates")),
+                    Icon::Download,
+                    tr(lang, "Software Updates"),
                     tr(lang, "Check for a new version of Wflow and download it"),
                 ),
                 ActiveTab::Settings => (
-                    format!("⚙️ {}", tr(lang, "Settings & Audio Hardware")),
+                    Icon::Gear,
+                    tr(lang, "Settings & Audio Hardware"),
                     tr(
                         lang,
                         "Configure microphones, AI models, and keyboard shortcuts",
@@ -1726,12 +1956,24 @@ impl WisprFlowGui {
             };
 
             ui.vertical(|ui| {
-                ui.label(
-                    egui::RichText::new(title)
-                        .font(heading(16.5))
-                        .strong()
-                        .color(Color32::WHITE),
-                );
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 9.0;
+                    let (icon_rect, _) =
+                        ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                    crate::icons::draw(
+                        ui.painter(),
+                        Pos2::new(icon_rect.center().x, icon_rect.min.y + 10.0),
+                        18.0,
+                        Color32::from_rgb(167, 139, 250),
+                        title_icon,
+                    );
+                    ui.label(
+                        egui::RichText::new(title)
+                            .font(heading(16.5))
+                            .strong()
+                            .color(Color32::WHITE),
+                    );
+                });
                 ui.label(
                     egui::RichText::new(subtitle)
                         .font(FontId::proportional(11.0))
@@ -1741,29 +1983,62 @@ impl WisprFlowGui {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Quick Dictate Action Button
-                let quick_btn = if is_rec {
-                    egui::Button::new(
-                        egui::RichText::new(shape_thai(&format!("⏹️ {}", tr(lang, "Stop"))))
-                            .font(FontId::proportional(12.0))
-                            .color(Color32::WHITE)
-                            .strong(),
+                let (q_icon, q_text, q_fill, q_stroke) = if is_rec {
+                    (
+                        Icon::Stop,
+                        tr(lang, "Stop"),
+                        Color32::from_rgb(185, 28, 28),
+                        Color32::from_rgb(239, 68, 68),
                     )
-                    .fill(Color32::from_rgb(185, 28, 28))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(239, 68, 68)))
-                    .rounding(Rounding::same(8.0))
                 } else {
-                    egui::Button::new(
-                        egui::RichText::new(shape_thai(&format!("🎙️ {}", tr(lang, "Dictate"))))
-                            .font(FontId::proportional(12.0))
-                            .color(Color32::WHITE)
-                            .strong(),
+                    (
+                        Icon::Mic,
+                        tr(lang, "Dictate"),
+                        Color32::from_rgb(79, 70, 229),
+                        Color32::from_rgb(129, 140, 248),
                     )
-                    .fill(Color32::from_rgb(37, 99, 235))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(96, 165, 250)))
-                    .rounding(Rounding::same(8.0))
                 };
-
-                if ui.add(quick_btn).clicked() {
+                let q_label = shape_thai(&q_text).to_string();
+                let q_galley = ui.painter().layout_no_wrap(
+                    q_label.clone(),
+                    FontId::proportional(12.0),
+                    Color32::WHITE,
+                );
+                let q_w = q_galley.size().x + 14.0 + 8.0 + 22.0;
+                let (q_rect, q_resp) =
+                    ui.allocate_exact_size(Vec2::new(q_w, 30.0), Sense::click());
+                let q_rect = q_rect.shrink(0.5);
+                ui.painter().rect_filled(
+                    q_rect,
+                    Rounding::same(8.0),
+                    if q_resp.hovered() {
+                        q_fill.linear_multiply(1.18)
+                    } else {
+                        q_fill
+                    },
+                );
+                ui.painter().rect_stroke(
+                    q_rect,
+                    Rounding::same(8.0),
+                    Stroke::new(1.0_f32, q_stroke),
+                );
+                let q_group = 14.0 + 8.0 + q_galley.size().x;
+                let q_start = q_rect.center().x - q_group / 2.0;
+                crate::icons::draw(
+                    ui.painter(),
+                    Pos2::new(q_start + 7.0, q_rect.center().y),
+                    14.0,
+                    Color32::WHITE,
+                    q_icon,
+                );
+                ui.painter().text(
+                    Pos2::new(q_start + 22.0, q_rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    q_label,
+                    FontId::proportional(12.0),
+                    Color32::WHITE,
+                );
+                if q_resp.clicked() {
                     if is_rec {
                         let _ = self.event_tx.send(GuiEvent::StopDictation);
                     } else {
@@ -1772,47 +2047,58 @@ impl WisprFlowGui {
                 }
 
                 ui.add_space(8.0);
-                let (status_text, bg_color, border_color) = match status {
+                let (status_icon, status_text, fg_color, bg_color, border_color) = match status {
                     DictationStatus::Idle => (
+                        Icon::Check,
                         tr1(lang, "Ready [{}]", dictate_key_name),
+                        Color32::from_rgb(110, 231, 183),
                         Color32::from_rgb(6, 78, 59),
                         Color32::from_rgb(16, 185, 129),
                     ),
                     DictationStatus::Listening => (
-                        format!("🔴 {}", tr(lang, "Recording...")),
+                        Icon::Dot,
+                        tr(lang, "Recording...").to_string(),
+                        Color32::from_rgb(254, 202, 202),
                         Color32::from_rgb(127, 29, 29),
                         Color32::from_rgb(239, 68, 68),
                     ),
                     DictationStatus::Transcribing => (
-                        format!("✨ {}", tr(lang, "AI Processing...")),
+                        Icon::Sparkle,
+                        tr(lang, "AI Processing...").to_string(),
+                        Color32::from_rgb(216, 180, 254),
                         Color32::from_rgb(88, 28, 135),
                         Color32::from_rgb(168, 85, 247),
                     ),
                     DictationStatus::Pasting => (
-                        format!("✍️ {}", tr(lang, "Pasting Text...")),
+                        Icon::Paste,
+                        tr(lang, "Pasting Text...").to_string(),
+                        Color32::from_rgb(191, 219, 254),
                         Color32::from_rgb(30, 58, 138),
                         Color32::from_rgb(59, 130, 246),
                     ),
                     DictationStatus::Done => (
-                        format!("✔ {}", tr(lang, "Inserted!")),
+                        Icon::Check,
+                        tr(lang, "Inserted!").to_string(),
+                        Color32::from_rgb(110, 231, 183),
                         Color32::from_rgb(6, 78, 59),
                         Color32::from_rgb(16, 185, 129),
                     ),
                     DictationStatus::Error => (
-                        format!("⚠️ {}", tr(lang, "Audio Error")),
+                        Icon::Alert,
+                        tr(lang, "Audio Error").to_string(),
+                        Color32::from_rgb(253, 230, 138),
                         Color32::from_rgb(120, 53, 15),
                         Color32::from_rgb(245, 158, 11),
                     ),
                 };
 
-                // Paint the pill background first, then the text on top of it.
-                let status_galley = ui.painter().layout_no_wrap(
-                    status_text.clone(),
-                    FontId::proportional(12.0),
-                    Color32::WHITE,
-                );
+                // Paint the pill background first, then the icon and text.
+                let status_label = shape_thai(&status_text).to_string();
+                let status_galley = ui
+                    .painter()
+                    .layout_no_wrap(status_label.clone(), FontId::proportional(12.0), fg_color);
                 let (status_rect, _) = ui.allocate_exact_size(
-                    status_galley.size() + egui::vec2(20.0, 12.0),
+                    status_galley.size() + egui::vec2(34.0, 12.0),
                     Sense::hover(),
                 );
                 ui.painter()
@@ -1822,12 +2108,19 @@ impl WisprFlowGui {
                     Rounding::same(12.0),
                     Stroke::new(1.0_f32, border_color),
                 );
+                crate::icons::draw(
+                    ui.painter(),
+                    Pos2::new(status_rect.min.x + 16.0, status_rect.center().y),
+                    12.0,
+                    fg_color,
+                    status_icon,
+                );
                 ui.painter().text(
-                    status_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    status_text,
+                    Pos2::new(status_rect.min.x + 26.0, status_rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    status_label,
                     FontId::proportional(12.0),
-                    Color32::WHITE,
+                    fg_color,
                 );
 
                 ui.add_space(8.0);
@@ -1839,14 +2132,14 @@ impl WisprFlowGui {
                     active_app.process_name.clone()
                 };
 
-                let ctx_label = format!("🎯 {}", tr1(lang, "Focus: {}", app_display));
+                let ctx_label = tr1(lang, "Focus: {}", app_display);
                 let ctx_galley = ui.painter().layout_no_wrap(
                     ctx_label.clone(),
                     FontId::proportional(11.5),
                     Color32::from_rgb(148, 163, 184),
                 );
                 let (ctx_rect, _) = ui.allocate_exact_size(
-                    ctx_galley.size() + egui::vec2(16.0, 10.0),
+                    ctx_galley.size() + egui::vec2(34.0, 10.0),
                     Sense::hover(),
                 );
                 ui.painter().rect_filled(
@@ -1859,9 +2152,16 @@ impl WisprFlowGui {
                     Rounding::same(8.0),
                     Stroke::new(1.0_f32, Color32::from_rgb(38, 50, 74)),
                 );
+                crate::icons::draw(
+                    ui.painter(),
+                    Pos2::new(ctx_rect.min.x + 14.0, ctx_rect.center().y),
+                    12.0,
+                    Color32::from_rgb(148, 163, 184),
+                    Icon::Target,
+                );
                 ui.painter().text(
-                    ctx_rect.center(),
-                    egui::Align2::CENTER_CENTER,
+                    Pos2::new(ctx_rect.min.x + 24.0, ctx_rect.center().y),
+                    egui::Align2::LEFT_CENTER,
                     ctx_label,
                     FontId::proportional(11.5),
                     Color32::from_rgb(148, 163, 184),
@@ -1879,110 +2179,110 @@ impl WisprFlowGui {
         dictate_key_name: &str,
     ) {
         let lang = self.ui_lang;
-        ui.columns(2, |cols| {
-            // LEFT COLUMN: Live Audio Visualizer & Controls
-            cols[0].vertical(|ui| {
+
+        // One column, ordered the way the feature is actually used: speak,
+        // read what came out, then check the numbers. The previous two-column
+        // split let the transcript card float over the record button and the
+        // waveform whenever the window was short.
+        //
+        // The scroll bar is hidden: on a short window the page still scrolls
+        // with the wheel or by dragging, but a permanent bar down the side of
+        // the only screen the user actually looks at made the layout feel
+        // cramped and broken.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                // -------------------- 1. Audio capture --------------------
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(17, 23, 36))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
+                    .fill(SURFACE)
+                    .stroke(Stroke::new(1.0_f32, SURFACE_LINE))
                     .rounding(Rounding::same(14.0))
                     .inner_margin(egui::Margin::same(16.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "🎙️  {}",
-                                    tr(lang, "AUDIO CAPTURE & WAVEFORM")
-                                ))
-                                    .font(FontId::proportional(12.0))
-                                    .color(Color32::from_rgb(148, 163, 184))
-                                    .strong(),
+                            icon_label(
+                                ui,
+                                Icon::Waveform,
+                                13.0,
+                                MUTED,
+                                &tr(lang, "AUDIO CAPTURE & WAVEFORM"),
+                                FontId::proportional(11.0),
                             );
 
-                            // Voice activity indicator: shows whether the
-                            // noise gate currently hears speech.
-                            if is_rec {
-                                let (speaking, noise, threshold) = {
-                                    let slot = lock(&self.state.voice_gate).clone();
-                                    match slot {
-                                        Some(gate) => {
-                                            let g = lock(&gate);
-                                            (g.is_speaking(), g.noise_floor(), g.threshold())
-                                        }
-                                        None => (true, 0.0, 0.0),
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if !is_rec {
+                                        return;
                                     }
-                                };
 
-                                let (label, color) = if speaking {
-                                    (
-                                        format!("🗣️ {}", tr(lang, "Speaking")),
-                                        Color32::from_rgb(74, 222, 128),
-                                    )
-                                } else {
-                                    (
-                                        format!("🤫 {}", tr(lang, "Silent")),
-                                        Color32::from_rgb(148, 163, 184),
-                                    )
-                                };
-
-                                let pill = ui.label(
-                                    egui::RichText::new(format!(
-                                        "{}  {:.0}dB / {:.0}dB",
-                                        label,
-                                        (noise * 1000.0).log10() * 20.0,
-                                        (threshold * 1000.0).log10() * 20.0
-                                    ))
-                                    .font(FontId::monospace(10.5))
-                                    .color(color)
-                                    .strong(),
-                                );
-                                ui.painter().rect_filled(
-                                    pill.rect.expand(3.0),
-                                    Rounding::same(6.0),
-                                    Color32::from_rgb(22, 29, 44),
-                                );
-                                ui.painter().rect_stroke(
-                                    pill.rect.expand(3.0),
-                                    Rounding::same(6.0),
-                                    Stroke::new(1.0_f32, Color32::from_rgb(38, 50, 74)),
-                                );
-                            }
-
-                            if is_rec {
-                                let elapsed = self.recording_start.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
-                                let mins = (elapsed / 60.0).floor() as u32;
-                                let secs = elapsed % 60.0;
-                                let time_str = format!("{:02}:{:04.1}", mins, secs);
-
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let pill = ui.label(
-                                        egui::RichText::new(format!(
-                                            "🔴 {}",
-                                            tr1(lang, "LIVE • {}", time_str)
-                                        ))
-                                            .font(FontId::monospace(11.5))
-                                            .color(Color32::from_rgb(254, 202, 202))
-                                            .strong(),
+                                    let elapsed = self
+                                        .recording_start
+                                        .map(|s| s.elapsed().as_secs_f32())
+                                        .unwrap_or(0.0);
+                                    let mins = (elapsed / 60.0).floor() as u32;
+                                    let time_str =
+                                        format!("{:02}:{:04.1}", mins, elapsed % 60.0);
+                                    icon_pill(
+                                        ui,
+                                        Some(Icon::Dot),
+                                        &tr1(lang, "LIVE • {}", time_str),
+                                        Color32::from_rgb(254, 202, 202),
+                                        Color32::from_rgb(127, 29, 29),
+                                        8.0,
+                                        FontId::monospace(11.0),
                                     );
-                                    ui.painter().rect_filled(
-                                        pill.rect.expand(3.0),
-                                        Rounding::same(6.0),
-                                        Color32::from_rgb(153, 27, 27),
+                                    ui.add_space(6.0);
+
+                                    // Voice-activity readout: is the gate
+                                    // hearing speech or just the room?
+                                    let (speaking, noise, threshold) = {
+                                        let slot = lock(&self.state.voice_gate).clone();
+                                        match slot {
+                                            Some(gate) => {
+                                                let g = lock(&gate);
+                                                (g.is_speaking(), g.noise_floor(), g.threshold())
+                                            }
+                                            None => (true, 0.0, 0.0),
+                                        }
+                                    };
+                                    let (label, fg, act_icon) = if speaking {
+                                        (
+                                            tr(lang, "Speaking"),
+                                            Color32::from_rgb(74, 222, 128),
+                                            Icon::Activity,
+                                        )
+                                    } else {
+                                        (tr(lang, "Silent"), MUTED, Icon::Flatline)
+                                    };
+                                    icon_pill(
+                                        ui,
+                                        Some(act_icon),
+                                        &format!(
+                                            "{}  {:.0}dB / {:.0}dB",
+                                            label,
+                                            (noise * 1000.0).log10() * 20.0,
+                                            (threshold * 1000.0).log10() * 20.0
+                                        ),
+                                        fg,
+                                        Color32::from_rgb(22, 29, 44),
+                                        11.0,
+                                        FontId::monospace(10.5),
                                     );
-                                });
-                            }
+                                },
+                            );
                         });
 
-                        ui.add_space(8.0);
+                        ui.add_space(10.0);
 
-                        // Visualizer Canvas (Audio Waveform)
-                        let visualizer_height = 110.0;
+                        // Waveform. Deliberately shallow: the tall, spiky
+                        // version competed with the controls below it.
+                        let visualizer_height = 74.0;
                         let (rect, _response) = ui.allocate_exact_size(
                             Vec2::new(ui.available_width(), visualizer_height),
                             Sense::hover(),
                         );
-
-                        // Visualizer Background
                         ui.painter().rect_filled(
                             rect,
                             Rounding::same(10.0),
@@ -1994,320 +2294,201 @@ impl WisprFlowGui {
                             Stroke::new(1.0_f32, Color32::from_rgb(26, 36, 54)),
                         );
 
-                        let bar_count = 36;
-                        let bar_width = (rect.width() - (bar_count as f32 * 3.5)) / bar_count as f32;
+                        let bar_count = 44;
+                        let gap = 3.0;
+                        let bar_width =
+                            (rect.width() - 16.0 - (bar_count as f32 * gap)) / bar_count as f32;
                         let center_y = rect.center().y;
 
-                        // Center horizontal guide line
                         ui.painter().line_segment(
                             [
                                 Pos2::new(rect.min.x + 8.0, center_y),
                                 Pos2::new(rect.max.x - 8.0, center_y),
                             ],
-                            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 15)),
+                            Stroke::new(
+                                1.0_f32,
+                                Color32::from_rgba_unmultiplied(255, 255, 255, 15),
+                            ),
                         );
 
                         for i in 0..bar_count {
-                            let x = rect.min.x + (i as f32 * (bar_width + 3.5)) + 4.0;
-                            let phase = (i as f32 * 0.32) + (self.animation_time * 4.2);
+                            let x = rect.min.x + 8.0 + (i as f32 * (bar_width + gap));
                             let t = i as f32 / bar_count as f32;
+                            let phase = (i as f32 * 0.32) + (self.animation_time * 3.0);
 
                             let height_factor = if is_rec {
-                                let wave = (phase.sin() * 0.45 + 0.55) * (amplitude * 7.5).clamp(0.18, 1.0);
-                                wave * (visualizer_height * 0.42)
+                                let wave = (phase.sin() * 0.35 + 0.55)
+                                    * (amplitude * 6.0).clamp(0.3, 1.0);
+                                wave * (visualizer_height * 0.19)
                             } else {
-                                (phase.sin() * 0.2 + 0.3) * 5.0
+                                (phase.sin() * 0.15 + 0.25) * 3.0
                             };
 
+                            // One cyan -> purple ramp instead of three
+                            // competing hues.
                             let bar_color = if is_rec {
-                                if t < 0.35 {
-                                    Color32::from_rgb(6, 182, 212) // Cyan
-                                } else if t < 0.70 {
-                                    Color32::from_rgb(99, 102, 241) // Indigo
-                                } else {
-                                    Color32::from_rgb(236, 72, 153) // Pink
-                                }
+                                Color32::from_rgb(
+                                    (6.0 + 118.0 * t) as u8,
+                                    (182.0 - 74.0 * t) as u8,
+                                    (212.0 + 28.0 * t).min(255.0) as u8,
+                                )
                             } else {
                                 Color32::from_rgb(45, 56, 80)
                             };
 
-                            let bar_rect = Rect::from_min_max(
-                                Pos2::new(x, center_y - height_factor),
-                                Pos2::new(x + bar_width, center_y + height_factor + 1.0),
+                            ui.painter().rect_filled(
+                                Rect::from_min_max(
+                                    Pos2::new(x, center_y - height_factor),
+                                    Pos2::new(x + bar_width, center_y + height_factor + 1.0),
+                                ),
+                                Rounding::same(2.0),
+                                bar_color,
                             );
-
-                            ui.painter().rect_filled(bar_rect, Rounding::same(3.0), bar_color);
                         }
 
-                        ui.add_space(14.0);
+                        ui.add_space(12.0);
 
-                        // Hero Action Button
+                        // The single primary action, placed below the
+                        // waveform instead of painted on top of it.
                         let is_tap = self.settings_recording_trigger_mode == "tap_to_toggle";
-                        let dictate_btn_text = if is_tap {
-                            format!(
-                                "🎙️  {}",
-                                tr1(lang, "START DICTATING (OR TAP {})", dictate_key_name)
-                            )
-                        } else {
-                            format!(
-                                "🎙️  {}",
-                                tr1(lang, "START DICTATING (OR HOLD {})", dictate_key_name)
-                            )
-                        };
-                        let (btn_text, btn_bg, btn_stroke) = if is_rec {
+                        let (btn_icon, btn_text, fill, border) = if is_rec {
                             (
-                                format!("⏹️  {}", tr(lang, "CLICK TO COMMIT & INSERT")),
-                                Color32::from_rgb(220, 38, 38),
-                                Color32::from_rgb(248, 113, 113),
+                                Icon::Stop,
+                                tr(lang, "CLICK TO COMMIT & INSERT").to_string(),
+                                Color32::from_rgb(190, 30, 36),
+                                Color32::from_rgb(239, 68, 68),
                             )
                         } else if status == DictationStatus::Transcribing {
                             (
-                                format!("✨  {}", tr(lang, "AI TRANSCRIBING...")),
-                                Color32::from_rgb(124, 58, 237),
+                                Icon::Sparkle,
+                                tr(lang, "AI TRANSCRIBING...").to_string(),
+                                Color32::from_rgb(76, 42, 158),
                                 Color32::from_rgb(168, 85, 247),
                             )
                         } else {
                             (
-                                dictate_btn_text,
+                                Icon::Mic,
+                                if is_tap {
+                                    tr1(
+                                        lang,
+                                        "START DICTATING (OR TAP {})",
+                                        dictate_key_name,
+                                    )
+                                } else {
+                                    tr1(
+                                        lang,
+                                        "START DICTATING (OR HOLD {})",
+                                        dictate_key_name,
+                                    )
+                                },
                                 Color32::from_rgb(79, 70, 229),
                                 Color32::from_rgb(129, 140, 248),
                             )
                         };
 
-                        let hero_btn = egui::Button::new(
-                            egui::RichText::new(btn_text)
-                                .font(FontId::proportional(14.0))
-                                .color(Color32::WHITE)
-                                .strong(),
-                        )
-                        .fill(btn_bg)
-                        .stroke(Stroke::new(1.0_f32, btn_stroke))
-                        .rounding(Rounding::same(10.0))
-                        .min_size(Vec2::new(ui.available_width(), 46.0));
-
-                        if ui.add(hero_btn).clicked() {
+                        let hero_clicked = icon_button(
+                            ui,
+                            btn_icon,
+                            &btn_text,
+                            44.0,
+                            fill,
+                            border,
+                            Color32::WHITE,
+                            heading(13.5),
+                            17.0,
+                            true,
+                        );
+                        if hero_clicked {
                             if is_rec {
                                 let _ = self.event_tx.send(GuiEvent::StopDictation);
-                            } else if status == DictationStatus::Idle || status == DictationStatus::Done {
+                            } else if status == DictationStatus::Idle
+                                || status == DictationStatus::Done
+                            {
                                 let _ = self.event_tx.send(GuiEvent::StartDictation);
                             }
                         }
 
                         ui.add_space(8.0);
-                        let tip_text = if is_tap {
-                            format!(
-                                "💡 {}",
-                                tr1(
-                                    lang,
-                                    "Tap {} once to start dictating hands-free, tap again to commit and insert text.",
-                                    dictate_key_name,
-                                )
+                        let tip = if is_tap {
+                            tr1(
+                                lang,
+                                "Tap {} once to start dictating hands-free, tap again to commit and insert text.",
+                                dictate_key_name,
                             )
                         } else {
-                            format!(
-                                "💡 {}",
-                                tr1(
-                                    lang,
-                                    "Hold {} while speaking to dictate directly into any text box.",
-                                    dictate_key_name,
-                                )
+                            tr1(
+                                lang,
+                                "Hold {} while speaking to dictate directly into any text box.",
+                                dictate_key_name,
                             )
                         };
-                        ui.label(
-                            egui::RichText::new(tip_text)
-                                .font(FontId::proportional(11.0))
-                                .color(Color32::from_rgb(148, 163, 184)),
+                        icon_label(
+                            ui,
+                            Icon::Keyboard,
+                            13.0,
+                            Color32::from_rgb(100, 116, 139),
+                            &tip,
+                            FontId::proportional(11.0),
                         );
                     });
 
-                ui.add_space(10.0);
+                ui.add_space(12.0);
 
-                // Detected Active Context Card
-                let active_app = lock(&self.state.active_app).clone();
-                egui::Frame::none()
-                    .fill(Color32::from_rgb(17, 23, 36))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
-                    .rounding(Rounding::same(14.0))
-                    .inner_margin(egui::Margin::same(14.0))
-                    .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "🎯  {}",
-                                tr(lang, "TARGET APPLICATION CONTEXT")
-                            ))
-                                .font(FontId::proportional(12.0))
-                                .color(Color32::from_rgb(148, 163, 184))
-                                .strong(),
-                        );
-                        ui.add_space(6.0);
-
-                        ui.horizontal(|ui| {
-                            let proc_text = if active_app.process_name.is_empty() {
-                                tr(lang, "Desktop Cursor").to_string()
-                            } else {
-                                active_app.process_name.clone()
-                            };
-
-                            let tag = ui.label(
-                                egui::RichText::new(format!("⚡ {}", proc_text))
-                                    .font(FontId::proportional(12.0))
-                                    .color(Color32::from_rgb(56, 189, 248))
-                                    .strong(),
-                            );
-                            ui.painter().rect_filled(
-                                tag.rect.expand(3.0),
-                                Rounding::same(6.0),
-                                Color32::from_rgba_unmultiplied(14, 165, 233, 35),
-                            );
-
-                            if !active_app.window_title.is_empty() {
-                                ui.label(
-                                    egui::RichText::new(format!("— {}", active_app.window_title))
-                                        .font(FontId::proportional(11.0))
-                                        .color(Color32::from_rgb(148, 163, 184)),
-                                );
-                            }
-                        });
-
-                        if let Some(before) = &active_app.before_text {
-                            if !before.is_empty() {
-                                ui.add_space(6.0);
-                                egui::Frame::none()
-                                    .fill(Color32::from_rgb(12, 16, 26))
-                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(26, 36, 54)))
-                                    .rounding(Rounding::same(6.0))
-                                    .inner_margin(egui::Margin::same(8.0))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            egui::RichText::new(tr1(
-                                                lang,
-                                                "Before Cursor: \"{}\"",
-                                                before,
-                                            ))
-                                                .font(FontId::proportional(11.0))
-                                                .italics()
-                                                .color(Color32::from_rgb(203, 213, 225)),
-                                        );
-                                    });
-                            }
-                        }
-                    });
-
-                ui.add_space(10.0);
-
-                // Active STT Pipeline & Model Status Card
-                let (prov_title, model_name, prov_color) = {
-                    let cfg = lock(&self.state.config);
-                    match cfg.stt_provider {
-                        SttProvider::WisprFlow => ("Wispr Flow Cloud".to_string(), "Native Stream (gRPC)".to_string(), Color32::from_rgb(129, 140, 248)),
-                        SttProvider::Groq => ("Groq Cloud LPU".to_string(), cfg.groq_model.clone(), Color32::from_rgb(251, 146, 60)),
-                        SttProvider::ElevenLabs => ("ElevenLabs".to_string(), cfg.elevenlabs_model.clone(), Color32::from_rgb(192, 132, 252)),
-                    }
-                };
+                // -------------------- 2. Latest transcription --------------------
+                let transcript = lock(&self.state.last_transcript).clone();
+                let latency = *lock(&self.state.last_latency);
 
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(17, 23, 36))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
-                    .rounding(Rounding::same(14.0))
-                    .inner_margin(egui::Margin::same(14.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "⚡  {}",
-                                    tr(lang, "AI SPEECH ENGINE")
-                                ))
-                                    .font(FontId::proportional(12.0))
-                                    .color(Color32::from_rgb(148, 163, 184))
-                                    .strong(),
-                            );
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui
-                                    .small_button(format!(
-                                        "⚙️ {}",
-                                        tr(lang, "Switch Model")
-                                    ))
-                                    .clicked()
-                                {
-                                    self.active_tab = ActiveTab::Settings;
-                                }
-                            });
-                        });
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            let tag = ui.label(
-                                egui::RichText::new(format!("● {}", prov_title))
-                                    .font(FontId::proportional(12.0))
-                                    .color(prov_color)
-                                    .strong(),
-                            );
-                            ui.painter().rect_filled(
-                                tag.rect.expand(3.0),
-                                Rounding::same(6.0),
-                                Color32::from_rgba_unmultiplied(prov_color.r(), prov_color.g(), prov_color.b(), 35),
-                            );
-
-                            ui.label(
-                                egui::RichText::new(tr1(lang, "Model: {}", model_name))
-                                    .font(FontId::proportional(12.5))
-                                    .color(Color32::WHITE)
-                                    .strong(),
-                            );
-                        });
-                    });
-            });
-
-            // RIGHT COLUMN: Live Transcript & Quick Actions
-            cols[1].vertical(|ui| {
-                egui::Frame::none()
-                    .fill(Color32::from_rgb(17, 23, 36))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
+                    .fill(SURFACE)
+                    .stroke(Stroke::new(1.0_f32, SURFACE_LINE))
                     .rounding(Rounding::same(14.0))
                     .inner_margin(egui::Margin::same(16.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "📝  {}",
-                                    tr(lang, "LATEST TRANSCRIPTION")
-                                ))
-                                    .font(FontId::proportional(12.0))
-                                    .color(Color32::from_rgb(148, 163, 184))
-                                    .strong(),
+                            icon_label(
+                                ui,
+                                Icon::FileText,
+                                13.0,
+                                MUTED,
+                                &tr(lang, "LATEST TRANSCRIPTION"),
+                                FontId::proportional(11.0),
                             );
-
-                            let latency = *lock(&self.state.last_latency);
                             if latency > 0.0 {
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let lat_pill = ui.label(
-                                        egui::RichText::new(format!("⚡ {:.0} ms", latency * 1000.0))
-                                            .font(FontId::monospace(11.0))
-                                            .color(Color32::from_rgb(74, 222, 128))
-                                            .strong(),
-                                    );
-                                    ui.painter().rect_filled(
-                                        lat_pill.rect.expand(2.5),
-                                        Rounding::same(4.0),
-                                        Color32::from_rgba_unmultiplied(34, 197, 94, 30),
-                                    );
-                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        icon_pill(
+                                            ui,
+                                            Some(Icon::Bolt),
+                                            &format!("{:.0} ms", latency * 1000.0),
+                                            Color32::from_rgb(74, 222, 128),
+                                            Color32::from_rgba_unmultiplied(34, 197, 94, 30),
+                                            11.0,
+                                            FontId::monospace(11.0),
+                                        );
+                                    },
+                                );
                             }
                         });
 
                         ui.add_space(8.0);
 
-                        let transcript = lock(&self.state.last_transcript).clone();
-
+                        // Shrinks to fit when there is nothing to show, so an
+                        // empty transcript card does not leave a tall hole.
                         egui::ScrollArea::vertical()
-                            .max_height(190.0)
+                            .max_height(120.0)
+                            .auto_shrink([false, true])
                             .show(ui, |ui| {
                                 if transcript.is_empty() {
-                                    ui.add_space(35.0);
                                     ui.vertical_centered(|ui| {
+                                        ui.add_space(6.0);
                                         ui.label(
-                                            egui::RichText::new(tr(lang, "No recent transcript."))
-                                                .font(FontId::proportional(13.5))
-                                                .color(Color32::from_rgb(100, 116, 139)),
+                                            egui::RichText::new(tr(
+                                                lang,
+                                                "No recent transcript.",
+                                            ))
+                                            .font(FontId::proportional(13.0))
+                                            .color(Color32::from_rgb(100, 116, 139)),
                                         );
                                         ui.label(
                                             egui::RichText::new(tr1(
@@ -2318,182 +2499,400 @@ impl WisprFlowGui {
                                             .font(FontId::proportional(11.0))
                                             .color(Color32::from_rgb(71, 85, 105)),
                                         );
+                                        ui.add_space(6.0);
                                     });
-                                    ui.add_space(20.0);
                                 } else {
                                     ui.label(
                                         egui::RichText::new(shape_thai(&transcript))
-                                            .font(FontId::proportional(15.0))
+                                            .font(FontId::proportional(14.5))
                                             .color(Color32::from_rgb(248, 250, 252)),
                                     );
                                 }
                             });
 
-                        ui.add_space(10.0);
-                        ui.separator();
-                        ui.add_space(6.0);
-
                         if !transcript.is_empty() {
-                            let word_count = transcript.split_whitespace().count();
-                            let char_count = transcript.chars().count();
-                            ui.label(
-                                egui::RichText::new(tr2(
-                                    lang,
-                                    "{} words • {} chars",
-                                    word_count,
-                                    char_count,
-                                ))
-                                .font(FontId::proportional(11.0))
-                                .color(Color32::from_rgb(148, 163, 184)),
-                            );
-                            ui.add_space(6.0);
-
-                            // Wrapped rather than right-aligned: three
-                            // buttons plus the counter never fit on one line
-                            // in a narrow card and used to overlap.
-                            ui.horizontal_wrapped(|ui| {
-                                let paste_btn =
-                                    egui::Button::new(format!("✍️ {}", tr(lang, "Re-paste")))
-                                        .fill(Color32::from_rgb(49, 46, 129))
-                                        .stroke(Stroke::new(
-                                            1.0_f32,
-                                            Color32::from_rgb(99, 102, 241),
-                                        ))
-                                        .rounding(Rounding::same(6.0));
-                                if ui.add(paste_btn).clicked() {
-                                    let _ = PlatformManager::paste_text(&transcript);
-                                    self.state.set_toast(tr(
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                let word_count = transcript.split_whitespace().count();
+                                let char_count = transcript.chars().count();
+                                ui.label(
+                                    egui::RichText::new(tr2(
                                         lang,
-                                        "Re-pasted transcript to active cursor!",
-                                    ));
-                                }
+                                        "{} words • {} chars",
+                                        word_count,
+                                        char_count,
+                                    ))
+                                    .font(FontId::proportional(11.0))
+                                    .color(MUTED),
+                                );
 
-                                let copy_btn =
-                                    egui::Button::new(format!("📋 {}", tr(lang, "Copy")))
-                                        .fill(Color32::from_rgb(33, 43, 64))
-                                        .stroke(Stroke::new(
-                                            1.0_f32,
-                                            Color32::from_rgb(51, 65, 85),
-                                        ))
-                                        .rounding(Rounding::same(6.0));
-                                if ui.add(copy_btn).clicked() {
-                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                        let _ = clipboard.set_text(&transcript);
-                                        self.state
-                                            .set_toast(tr(lang, "Copied transcript to clipboard!"));
-                                    }
-                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let surface_btn = Color32::from_rgb(33, 43, 64);
+                                        let surface_line = Color32::from_rgb(51, 65, 85);
 
-                                let clear_btn =
-                                    egui::Button::new(format!("🗑️ {}", tr(lang, "Clear")))
-                                        .fill(Color32::from_rgb(33, 43, 64))
-                                        .stroke(Stroke::new(
-                                            1.0_f32,
-                                            Color32::from_rgb(51, 65, 85),
-                                        ))
-                                        .rounding(Rounding::same(6.0));
-                                if ui.add(clear_btn).clicked() {
-                                    *lock(&self.state.last_transcript) = String::new();
-                                    self.state.set_toast(tr(lang, "Transcript cleared"));
-                                }
+                                        if icon_button_small(
+                                            ui,
+                                            Icon::Trash,
+                                            26.0,
+                                            surface_btn,
+                                            surface_line,
+                                            Color32::from_rgb(252, 165, 165),
+                                            &tr(lang, "Clear"),
+                                        ) {
+                                            *lock(&self.state.last_transcript) = String::new();
+                                            self.state.set_toast(tr(lang, "Transcript cleared"));
+                                        }
+                                        ui.add_space(6.0);
+
+                                        if icon_button_small(
+                                            ui,
+                                            Icon::Copy,
+                                            26.0,
+                                            surface_btn,
+                                            surface_line,
+                                            Color32::from_rgb(203, 213, 225),
+                                            &tr(lang, "Copy"),
+                                        ) {
+                                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                                let _ = clipboard.set_text(&transcript);
+                                                self.state.set_toast(tr(
+                                                    lang,
+                                                    "Copied transcript to clipboard!",
+                                                ));
+                                            }
+                                        }
+                                        ui.add_space(6.0);
+
+                                        if icon_button_small(
+                                            ui,
+                                            Icon::Paste,
+                                            26.0,
+                                            Color32::from_rgb(49, 46, 129),
+                                            Color32::from_rgb(99, 102, 241),
+                                            Color32::WHITE,
+                                            &tr(lang, "Re-paste"),
+                                        ) {
+                                            let _ = PlatformManager::paste_text(&transcript);
+                                            self.state.set_toast(tr(
+                                                lang,
+                                                "Re-pasted transcript to active cursor!",
+                                            ));
+                                        }
+                                    },
+                                );
                             });
                         }
                     });
 
-                ui.add_space(10.0);
+                ui.add_space(12.0);
 
-                // Quick Stats Card
+                // -------------------- 3. Quick stats --------------------
                 let history_count = lock(&self.state.history).len();
+                let latency_text = if latency > 0.0 {
+                    format!("{:.0} ms", latency * 1000.0)
+                } else {
+                    "—".to_string()
+                };
+
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(17, 23, 36))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
+                    .fill(SURFACE)
+                    .stroke(Stroke::new(1.0_f32, SURFACE_LINE))
                     .rounding(Rounding::same(14.0))
                     .inner_margin(egui::Margin::same(14.0))
                     .show(ui, |ui| {
-                        ui.columns(3, |stat_cols| {
-                            let last_latency = *lock(&self.state.last_latency);
-                            let latency_text = if last_latency > 0.0 {
-                                format!("{:.0} ms", last_latency * 1000.0)
-                            } else {
-                                "—".to_string()
-                            };
-                            stat_cols[0].vertical(|ui| {
-                                ui.label(egui::RichText::new(tr(lang, "RECORDED")).font(FontId::proportional(10.0)).color(Color32::from_rgb(148, 163, 184)));
-                                ui.label(egui::RichText::new(tr1(lang, "{} Entries", history_count)).font(heading(14.0)).strong().color(Color32::from_rgb(167, 139, 250)));
-                            });
-                            stat_cols[1].vertical(|ui| {
-                                ui.label(egui::RichText::new(tr(lang, "LATENCY")).font(FontId::proportional(10.0)).color(Color32::from_rgb(148, 163, 184)));
-                                ui.label(egui::RichText::new(latency_text).font(heading(14.0)).strong().color(Color32::from_rgb(52, 211, 153)));
-                            });
-                            stat_cols[2].vertical(|ui| {
-                                ui.label(egui::RichText::new(tr(lang, "STORAGE")).font(FontId::proportional(10.0)).color(Color32::from_rgb(148, 163, 184)));
-                                ui.label(egui::RichText::new(tr(lang, "SQLite Local")).font(heading(14.0)).strong().color(Color32::from_rgb(56, 189, 248)));
-                            });
+                        ui.columns(3, |cols| {
+                            let stats = [
+                                (
+                                    Icon::History,
+                                    tr(lang, "RECORDED").to_string(),
+                                    tr1(lang, "{} Entries", history_count),
+                                    Color32::from_rgb(167, 139, 250),
+                                ),
+                                (
+                                    Icon::Clock,
+                                    tr(lang, "LATENCY").to_string(),
+                                    latency_text.clone(),
+                                    Color32::from_rgb(52, 211, 153),
+                                ),
+                                (
+                                    Icon::Server,
+                                    tr(lang, "STORAGE").to_string(),
+                                    tr(lang, "SQLite Local").to_string(),
+                                    Color32::from_rgb(56, 189, 248),
+                                ),
+                            ];
+                            for (col, (icon, label, value, color)) in
+                                cols.iter_mut().zip(stats.iter())
+                            {
+                                icon_label(col, *icon, 12.0, MUTED, label, FontId::proportional(10.0));
+                                col.add_space(4.0);
+                                col.label(
+                                    egui::RichText::new(value)
+                                        .font(heading(14.0))
+                                        .strong()
+                                        .color(*color),
+                                );
+                            }
                         });
                     });
 
-                ui.add_space(10.0);
+                ui.add_space(12.0);
 
-                // Recent Activity Card (Mini History in Studio)
-                let recent_items: Vec<_> = lock(&self.state.history).iter().take(3).cloned().collect();
+                // -------------------- 4. Context & engine --------------------
+                let active_app = lock(&self.state.active_app).clone();
+                let (prov_title, model_name, prov_color) = {
+                    let cfg = lock(&self.state.config);
+                    match cfg.stt_provider {
+                        SttProvider::WisprFlow => (
+                            "Wispr Flow Cloud".to_string(),
+                            "Native Stream (gRPC)".to_string(),
+                            Color32::from_rgb(129, 140, 248),
+                        ),
+                        SttProvider::Groq => (
+                            "Groq Cloud LPU".to_string(),
+                            cfg.groq_model.clone(),
+                            Color32::from_rgb(251, 146, 60),
+                        ),
+                        SttProvider::ElevenLabs => (
+                            "ElevenLabs".to_string(),
+                            cfg.elevenlabs_model.clone(),
+                            Color32::from_rgb(192, 132, 252),
+                        ),
+                    }
+                };
+
+                ui.columns(2, |cols| {
+                    // Where the text will land.
+                    egui::Frame::none()
+                        .fill(SURFACE)
+                        .stroke(Stroke::new(1.0_f32, SURFACE_LINE))
+                        .rounding(Rounding::same(14.0))
+                        .inner_margin(egui::Margin::same(14.0))
+                        .show(&mut cols[0], |ui| {
+                            ui.horizontal(|ui| {
+                                let (icon_rect, _) =
+                                    ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
+                                ui.painter().rect_filled(
+                                    icon_rect,
+                                    Rounding::same(9.0),
+                                    Color32::from_rgba_unmultiplied(14, 165, 233, 30),
+                                );
+                                crate::icons::draw(
+                                    ui.painter(),
+                                    icon_rect.center(),
+                                    16.0,
+                                    Color32::from_rgb(56, 189, 248),
+                                    Icon::Target,
+                                );
+
+                                ui.add_space(4.0);
+                                ui.vertical(|ui| {
+                                    let proc_text = if active_app.process_name.is_empty() {
+                                        tr(lang, "Desktop Cursor").to_string()
+                                    } else {
+                                        active_app.process_name.clone()
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(proc_text)
+                                            .font(FontId::proportional(12.5))
+                                            .strong()
+                                            .color(Color32::WHITE),
+                                    );
+                                    let sub = if active_app.window_title.is_empty() {
+                                        tr(lang, "TARGET APPLICATION CONTEXT").to_string()
+                                    } else {
+                                        active_app.window_title.clone()
+                                    };
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(sub)
+                                                .font(FontId::proportional(11.0))
+                                                .color(MUTED),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
+                            });
+                        });
+
+                    // Which model is doing the work.
+                    egui::Frame::none()
+                        .fill(SURFACE)
+                        .stroke(Stroke::new(1.0_f32, SURFACE_LINE))
+                        .rounding(Rounding::same(14.0))
+                        .inner_margin(egui::Margin::same(14.0))
+                        .show(&mut cols[1], |ui| {
+                            ui.horizontal(|ui| {
+                                let (icon_rect, _) =
+                                    ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
+                                ui.painter().rect_filled(
+                                    icon_rect,
+                                    Rounding::same(9.0),
+                                    Color32::from_rgba_unmultiplied(124, 108, 240, 34),
+                                );
+                                crate::icons::draw(
+                                    ui.painter(),
+                                    icon_rect.center(),
+                                    16.0,
+                                    prov_color,
+                                    Icon::Bolt,
+                                );
+
+                                ui.add_space(4.0);
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(&prov_title)
+                                            .font(FontId::proportional(12.5))
+                                            .strong()
+                                            .color(Color32::WHITE),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(tr1(
+                                                lang,
+                                                "Model: {}",
+                                                model_name.clone(),
+                                            ))
+                                            .font(FontId::proportional(11.0))
+                                            .color(MUTED),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let (rect, response) = ui.allocate_exact_size(
+                                            Vec2::new(28.0, 28.0),
+                                            Sense::click(),
+                                        );
+                                        let rect = rect.shrink(0.5);
+                                        ui.painter().rect_filled(
+                                            rect,
+                                            Rounding::same(8.0),
+                                            if response.hovered() {
+                                                Color32::from_rgb(40, 52, 78)
+                                            } else {
+                                                Color32::from_rgb(26, 33, 50)
+                                            },
+                                        );
+                                        ui.painter().rect_stroke(
+                                            rect,
+                                            Rounding::same(8.0),
+                                            Stroke::new(1.0_f32, SURFACE_LINE),
+                                        );
+                                        crate::icons::draw(
+                                            ui.painter(),
+                                            rect.center(),
+                                            15.0,
+                                            MUTED,
+                                            Icon::Swap,
+                                        );
+                                        if response.clicked() {
+                                            self.active_tab = ActiveTab::Settings;
+                                        }
+                                        let _ = response.on_hover_text(tr(lang, "Switch Model"));
+                                    },
+                                );
+                            });
+                        });
+                });
+
+                ui.add_space(12.0);
+
+                // -------------------- 5. Recent activity --------------------
+                let recent_items: Vec<_> = lock(&self.state.history)
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect();
+
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(17, 23, 36))
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(33, 44, 66)))
+                    .fill(SURFACE)
+                    .stroke(Stroke::new(1.0_f32, SURFACE_LINE))
                     .rounding(Rounding::same(14.0))
                     .inner_margin(egui::Margin::same(14.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "🕒  {}",
-                                    tr(lang, "RECENT ACTIVITY")
-                                ))
-                                    .font(FontId::proportional(12.0))
-                                    .color(Color32::from_rgb(148, 163, 184))
-                                    .strong(),
+                            icon_label(
+                                ui,
+                                Icon::Clock,
+                                13.0,
+                                MUTED,
+                                &tr(lang, "RECENT ACTIVITY"),
+                                FontId::proportional(11.0),
                             );
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui
-                                    .small_button(tr(lang, "View All →"))
-                                    .clicked()
-                                {
-                                    self.active_tab = ActiveTab::History;
-                                    let _ = self.event_tx.send(GuiEvent::RefreshHistory);
-                                }
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button(tr(lang, "View All →"))
+                                        .clicked()
+                                    {
+                                        self.active_tab = ActiveTab::History;
+                                        let _ = self.event_tx.send(GuiEvent::RefreshHistory);
+                                    }
+                                },
+                            );
                         });
+
                         ui.add_space(6.0);
 
                         if recent_items.is_empty() {
-                            ui.label(
-                                egui::RichText::new(tr(
+                            icon_label(
+                                ui,
+                                Icon::Flatline,
+                                12.0,
+                                Color32::from_rgb(100, 116, 139),
+                                &tr(
                                     lang,
                                     "No recent transcriptions yet. Dictate anywhere to see activity.",
-                                ))
-                                    .font(FontId::proportional(11.0))
-                                    .color(Color32::from_rgb(100, 116, 139)),
+                                ),
+                                FontId::proportional(11.0),
                             );
                         } else {
                             for item in recent_items {
                                 ui.horizontal(|ui| {
+                                    crate::icons::draw(
+                                        ui.painter(),
+                                        Pos2::new(
+                                            ui.cursor().min.x + 6.0,
+                                            ui.cursor().min.y + 9.0,
+                                        ),
+                                        12.0,
+                                        Color32::from_rgb(124, 108, 240),
+                                        Icon::Bolt,
+                                    );
+                                    ui.add_space(12.0);
+
                                     let app_label = if item.app.is_empty() {
-                                        tr(lang, "Desktop")
+                                        tr(lang, "Desktop").to_string()
                                     } else {
-                                        item.app.as_str()
+                                        item.app.as_str().to_string()
                                     };
                                     ui.label(
-                                        egui::RichText::new(format!("⚡ {}", app_label))
+                                        egui::RichText::new(app_label)
                                             .font(FontId::proportional(10.5))
+                                            .strong()
                                             .color(Color32::from_rgb(56, 189, 248)),
                                     );
+
                                     let snippet = if item.formatted_text.chars().count() > 32 {
-                                        format!("{}...", item.formatted_text.chars().take(30).collect::<String>())
+                                        format!(
+                                            "{}...",
+                                            item.formatted_text.chars().take(30).collect::<String>()
+                                        )
                                     } else {
                                         item.formatted_text.clone()
                                     };
 
-                                    // Reserve room for the copy button; a long
-                                    // snippet used to be painted underneath it.
+                                    // Reserve room for the copy button so a
+                                    // long snippet cannot be painted under it.
                                     let text_width = (ui.available_width() - 34.0).max(40.0);
                                     ui.allocate_ui_with_layout(
                                         Vec2::new(text_width, 18.0),
@@ -2501,7 +2900,7 @@ impl WisprFlowGui {
                                         |ui| {
                                             ui.add(
                                                 egui::Label::new(
-                                                    egui::RichText::new(snippet)
+                                                    egui::RichText::new(shape_thai(&snippet))
                                                         .font(FontId::proportional(11.0))
                                                         .color(Color32::from_rgb(203, 213, 225)),
                                                 )
@@ -2510,11 +2909,15 @@ impl WisprFlowGui {
                                         },
                                     );
 
-                                    if ui
-                                        .small_button("📋")
-                                        .on_hover_text(tr(lang, "Copy"))
-                                        .clicked()
-                                    {
+                                    if icon_button_small(
+                                        ui,
+                                        Icon::Copy,
+                                        22.0,
+                                        Color32::TRANSPARENT,
+                                        SURFACE_LINE,
+                                        MUTED,
+                                        &tr(lang, "Copy"),
+                                    ) {
                                         if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                             let _ = clipboard.set_text(&item.formatted_text);
                                             self.state
@@ -2527,7 +2930,6 @@ impl WisprFlowGui {
                         }
                     });
             });
-        });
     }
 
     fn render_history_tab(&mut self, ui: &mut egui::Ui) {
@@ -4618,7 +5020,22 @@ impl WisprFlowGui {
                 ui.add_space(8.0);
                 ui.checkbox(
                     &mut self.settings_check_updates,
-                    tr(lang, "Check for updates automatically at startup"),
+                    tr(lang, "Check for new versions in the background"),
+                );
+                ui.checkbox(
+                    &mut self.settings_auto_update,
+                    tr(lang, "Install new versions automatically"),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "  └ {}",
+                        tr(
+                            lang,
+                            "Downloads the release for this platform, verifies its checksum, then restarts Wflow. It waits until you are not dictating."
+                        )
+                    ))
+                    .font(FontId::proportional(10.5))
+                    .color(Color32::from_rgb(100, 116, 139)),
                 );
                 ui.checkbox(
                     &mut self.settings_include_prerelease,
@@ -4921,6 +5338,7 @@ impl WisprFlowGui {
             share_context: self.settings_share_context,
             store_textbox_contents: self.settings_store_textbox_contents,
             check_updates: self.settings_check_updates,
+            auto_update: self.settings_auto_update,
             include_prerelease: self.settings_include_prerelease,
             update_check_interval_hours: self.settings_update_interval_hours.max(1),
             last_update_check,
@@ -5164,18 +5582,56 @@ impl WisprFlowGui {
                         color,
                     );
 
-                    painter.text(
-                        Pos2::new(pill.min.x + 36.0, pill.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        &badge,
+                    // Measure instead of hard-coding offsets: the provider
+                    // badge and the status label are both translated, so a
+                    // fixed x used to let the two collide in Thai, and let the
+                    // label run under the waveform on the right.
+                    let badge_galley = painter.layout_no_wrap(
+                        badge.clone(),
                         FontId::proportional(11.5),
                         Color32::from_rgb(148, 163, 184),
                     );
-                    painter.text(
-                        Pos2::new(pill.min.x + 92.0, pill.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        shape_thai(&label),
+                    let badge_x = pill.min.x + 36.0;
+                    // A galley is drawn from its top-left corner, so shift it
+                    // up by half its height to sit on the pill's centre line.
+                    painter.galley(
+                        Pos2::new(
+                            badge_x,
+                            pill.center().y - badge_galley.size().y / 2.0,
+                        ),
+                        badge_galley.clone(),
+                        Color32::from_rgb(148, 163, 184),
+                    );
+
+                    let label_x = badge_x + badge_galley.size().x + 10.0;
+                    // Everything left of the waveform / stop button.
+                    let right_reserve = if can_stop { 58.0 } else { 62.0 };
+                    let room = (pill.max.x - right_reserve - label_x).max(24.0);
+                    let label_galley = painter.layout_no_wrap(
+                        shape_thai(&label).to_string(),
                         FontId::proportional(12.5),
+                        Color32::WHITE,
+                    );
+                    let label_galley = if label_galley.size().x > room {
+                        let mut job = egui::text::LayoutJob::simple(
+                            shape_thai(&label).to_string(),
+                            FontId::proportional(12.5),
+                            Color32::WHITE,
+                            room,
+                        );
+                        // Thai is written without spaces between words, so
+                        // wrapping on word boundaries alone would overflow.
+                        job.wrap.break_anywhere = true;
+                        painter.layout_job(job)
+                    } else {
+                        label_galley
+                    };
+                    painter.galley(
+                        Pos2::new(
+                            label_x,
+                            pill.center().y - label_galley.size().y / 2.0,
+                        ),
+                        label_galley,
                         Color32::WHITE,
                     );
 
@@ -5444,6 +5900,35 @@ impl WisprFlowGui {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The PUA probe has to answer "no" for a font that genuinely lacks the
+    /// WTT block — that is the case for Noto Sans Thai, Leelawadee UI and
+    /// Tahoma, and shaping onto their missing glyphs is what painted the
+    /// interface in tofu boxes.
+    #[test]
+    fn font_without_the_pua_block_disables_shaping() {
+        assert!(!font_has_thai_pua(include_bytes!(
+            "../assets/NotoEmoji-Regular.ttf"
+        )));
+        assert!(!font_has_thai_pua(b"not a font at all"));
+    }
+
+    /// Positive control for the same lookup: if the probe cannot see a glyph
+    /// that really is in the file, it would also miss the PUA block on a TLWG
+    /// font and silently disable shaping for every Linux user.
+    #[test]
+    fn glyph_probe_reports_glyphs_that_are_present() {
+        use ab_glyph::Font as _;
+        let font = ab_glyph::FontArc::try_from_vec(
+            include_bytes!("../assets/NotoEmoji-Regular.ttf").to_vec(),
+        )
+        .expect("bundled emoji font should parse");
+        assert_ne!(
+            font.glyph_id('\u{1F600}'),
+            ab_glyph::GlyphId(0),
+            "U+1F600 is in Noto Emoji, so the probe must find it"
+        );
+    }
 
     #[test]
     fn update_button_is_always_labelled() {

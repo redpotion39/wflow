@@ -1,4 +1,29 @@
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Whether the Thai font the GUI actually loaded contains the WTT 2.0 PUA
+/// glyphs (0xF700..0xF71A) that `shape_thai` maps vowels and tone marks onto.
+///
+/// Only the TLWG fonts (Garuda, Waree, Laksaman, ...) ship those glyphs.
+/// Windows Thai faces (Leelawadee UI, Tahoma) do not, and neither does the
+/// common Linux default that `fc-match :lang=th` hands back — Noto Sans Thai.
+/// Shaping onto a codepoint the font does not have paints a tofu box, which is
+/// how the interface ended up in "alien language" in the first place.
+///
+/// The GUI sets this once, after it has picked a font, by inspecting the real
+/// font file. While it is false `shape_thai` leaves the text untouched and the
+/// font's own metrics do the work.
+static PUA_SHAPING_SUPPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Records whether the active Thai face can render the PUA shaping glyphs.
+pub fn set_pua_support(supported: bool) {
+    PUA_SHAPING_SUPPORTED.store(supported, Ordering::SeqCst);
+}
+
+/// True when `shape_thai` may safely substitute PUA codepoints.
+pub fn pua_supported() -> bool {
+    PUA_SHAPING_SUPPORTED.load(Ordering::SeqCst)
+}
 
 /// Checks if a character is a Thai consonant (ก..ฮ, 0x0E01..=0x0E2E).
 #[inline]
@@ -120,7 +145,24 @@ fn lower_lower_vowel(c: char) -> char {
 /// This eliminates floating tone marks ("สระลอย"), ascender collisions with
 /// tall consonants (ป, ฝ, ฟ, ฬ), and pedestal/descender collisions (ฐ, ญ, ฎ, ฏ)
 /// when rendering in graphical toolkits lacking HarfBuzz OpenType shaping (like egui).
+///
+/// The substitution is only applied when the font that is actually drawing the
+/// text owns those glyphs. Where it does not — Noto Sans Thai, Leelawadee UI,
+/// Tahoma — the raw Unicode text is returned untouched, because mapping a
+/// vowel onto a missing glyph paints a tofu box and loses the word entirely.
 pub fn shape_thai(text: &str) -> Cow<'_, str> {
+    if pua_supported() {
+        shape_thai_unchecked(text)
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+/// The shaping itself, with no capability check.
+///
+/// Kept separate so the mapping tables can be unit-tested without mutating
+/// process-wide state, which would make the suite order-dependent.
+fn shape_thai_unchecked(text: &str) -> Cow<'_, str> {
     if !text.chars().any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c)) {
         return Cow::Borrowed(text);
     }
@@ -252,49 +294,67 @@ pub fn shape_thai(text: &str) -> Cow<'_, str> {
 mod tests {
     use super::*;
 
+    /// The mapping tables are exercised through `shape_thai_unchecked`, so no
+    /// test has to mutate the process-wide capability flag.
+    fn shaped(text: &str) -> Cow<'_, str> {
+        shape_thai_unchecked(text)
+    }
+
     #[test]
     fn test_non_thai_passthrough() {
-        assert_eq!(shape_thai("Hello World 123!"), "Hello World 123!");
-        assert_eq!(shape_thai("日本語テスト"), "日本語テスト");
+        assert_eq!(shaped("Hello World 123!"), "Hello World 123!");
+        assert_eq!(shaped("日本語テスト"), "日本語テスト");
+    }
+
+    #[test]
+    fn shaping_is_skipped_when_the_font_lacks_the_glyphs() {
+        // This gate is what keeps Noto Sans Thai and Leelawadee UI readable:
+        // without it every vowel and tone mark turns into a tofu box.
+        set_pua_support(false);
+        assert_eq!(shape_thai("ก่"), "ก่");
+
+        set_pua_support(true);
+        assert_ne!(shape_thai("ก่"), "ก่");
+        set_pua_support(false);
     }
 
     #[test]
     fn test_lowered_tone_no_floating() {
         // ก่ -> ก + ่ (lowered to 0xF70A)
-        let shaped = shape_thai("ก่");
-        let codepoints: Vec<u32> = shaped.chars().map(|c| c as u32).collect();
+        let out = shaped("ก่");
+        let codepoints: Vec<u32> = out.chars().map(|c| c as u32).collect();
         assert_eq!(codepoints, vec![0x0E01, 0xF70A]);
     }
 
     #[test]
     fn test_tall_consonant_lowered_left() {
         // ป่ -> ป + ่ (lowered and shifted left to 0xF705)
-        let shaped = shape_thai("ป่");
-        let codepoints: Vec<u32> = shaped.chars().map(|c| c as u32).collect();
+        let out = shaped("ป่");
+        let codepoints: Vec<u32> = out.chars().map(|c| c as u32).collect();
         assert_eq!(codepoints, vec![0x0E1B, 0xF705]);
     }
 
     #[test]
     fn test_upper_vowel_and_level2_tone() {
         // กิ่ง -> ก + ิ + ่ (level 2) + ง
-        let shaped = shape_thai("กิ่ง");
-        let codepoints: Vec<u32> = shaped.chars().map(|c| c as u32).collect();
+        let out = shaped("กิ่ง");
+        let codepoints: Vec<u32> = out.chars().map(|c| c as u32).collect();
         assert_eq!(codepoints, vec![0x0E01, 0x0E34, 0x0E48, 0x0E07]);
     }
 
     #[test]
     fn test_tall_upper_vowel_and_tone() {
         // ปิ้ง -> ป + ิ(left) + ้(left level 2) + ง
-        let shaped = shape_thai("ปิ้ง");
-        let codepoints: Vec<u32> = shaped.chars().map(|c| c as u32).collect();
+        let out = shaped("ปิ้ง");
+        let codepoints: Vec<u32> = out.chars().map(|c| c as u32).collect();
         assert_eq!(codepoints, vec![0x0E1B, 0xF701, 0xF714, 0x0E07]);
     }
 
     #[test]
     fn test_phu_yai() {
         // ผู้ใหญ่ -> ผ + ู + ้ (lowered) + ใ + ห + ญ + ่ (lowered)
-        let shaped = shape_thai("ผู้ใหญ่");
-        let codepoints: Vec<u32> = shaped.chars().map(|c| c as u32).collect();
+        let out = shaped("ผู้ใหญ่");
+        let codepoints: Vec<u32> = out.chars().map(|c| c as u32).collect();
         assert_eq!(
             codepoints,
             vec![0x0E1C, 0x0E39, 0xF70B, 0x0E43, 0x0E2B, 0x0E0D, 0xF70A]
@@ -304,29 +364,29 @@ mod tests {
     #[test]
     fn test_sara_am_decomposition() {
         // น้ำ -> น + ํ (0x0E4D) + ้ (0x0E49) + า (0x0E32)
-        let shaped = shape_thai("น้ำ");
-        let codepoints: Vec<u32> = shaped.chars().map(|c| c as u32).collect();
+        let out = shaped("น้ำ");
+        let codepoints: Vec<u32> = out.chars().map(|c| c as u32).collect();
         assert_eq!(codepoints, vec![0x0E19, 0x0E4D, 0x0E49, 0x0E32]);
     }
 
     #[test]
     fn test_pedestal_removal() {
         // ฐุ -> ฐ(descless 0xF700) + ุ
-        let shaped = shape_thai("ฐุ");
-        let codepoints: Vec<u32> = shaped.chars().map(|c| c as u32).collect();
+        let out = shaped("ฐุ");
+        let codepoints: Vec<u32> = out.chars().map(|c| c as u32).collect();
         assert_eq!(codepoints, vec![0xF700, 0x0E38]);
 
         // ญุ -> ญ(descless 0xF70F) + ุ
-        let shaped = shape_thai("ญุ");
-        let codepoints: Vec<u32> = shaped.chars().map(|c| c as u32).collect();
+        let out = shaped("ญุ");
+        let codepoints: Vec<u32> = out.chars().map(|c| c as u32).collect();
         assert_eq!(codepoints, vec![0xF70F, 0x0E38]);
     }
 
     #[test]
     fn test_strict_descender() {
         // ฎุ -> ฎ + ุ(lowered 0xF718)
-        let shaped = shape_thai("ฎุ");
-        let codepoints: Vec<u32> = shaped.chars().map(|c| c as u32).collect();
+        let out = shaped("ฎุ");
+        let codepoints: Vec<u32> = out.chars().map(|c| c as u32).collect();
         assert_eq!(codepoints, vec![0x0E0E, 0xF718]);
     }
 }

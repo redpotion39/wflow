@@ -8,8 +8,9 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, W
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateBitmap, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
     CreatePen, CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint,
-    InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TextOutW,
-    FW_BOLD, FW_NORMAL, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT,
+    InvalidateRect, RoundRect, SelectObject, SetBkMode, SetGraphicsMode, SetTextColor,
+    SetWindowRgn, SetWorldTransform, TextOutW, DEFAULT_CHARSET, FW_BOLD, FW_NORMAL, GM_ADVANCED,
+    PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT, XFORM,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -32,6 +33,7 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NOTIFYICONDATAW,
 };
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, FindWindowW, GetClassNameW,
@@ -41,11 +43,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, HICON,
     HWND_TOP, ICONINFO, IDI_APPLICATION, IMAGE_ICON, KBDLLHOOKSTRUCT, LR_DEFAULTCOLOR, MF_CHECKED,
     MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, SM_CXSCREEN, SM_CXSMICON, SM_CYSCREEN, SM_CYSMICON,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_APP, WM_CLOSE,
-    WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_PAINT,
-    WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETICON, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE,
+    SW_SHOW, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL,
+    WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP,
+    WM_SETICON, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
 };
 
 use crate::ui::DictationStatus;
@@ -89,7 +92,48 @@ static HUD_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new
 static HUD_AMPLITUDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static HUD_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static HUD_BADGE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+// Current DPI of the monitor the HUD sits on (96 = 100% scaling). The HUD is
+// authored in design pixels for 96 DPI and scaled by HUD_DPI/96 at draw time
+// so it keeps the same physical size on HiDPI laptop screens.
+static HUD_DPI: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(96);
 const WM_TRAY_CALLBACK: u32 = WM_APP + 101;
+
+/// Design size of the floating HUD, in 96-DPI pixels.
+const HUD_DESIGN_W: i32 = 280;
+const HUD_DESIGN_H: i32 = 58;
+
+#[inline]
+fn hud_scale() -> f32 {
+    HUD_DPI.load(Ordering::SeqCst) as f32 / 96.0
+}
+
+/// Repositions and resizes the HUD window for its current monitor DPI and
+/// updates the rounded window region to match.
+unsafe fn resize_hud_for_dpi(hwnd: HWND) {
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    HUD_DPI.store(dpi, Ordering::SeqCst);
+    let k = dpi as f32 / 96.0;
+    let w = (HUD_DESIGN_W as f32 * k).round() as i32;
+    let h = (HUD_DESIGN_H as f32 * k).round() as i32;
+
+    let screen_w = GetSystemMetrics(SM_CXSCREEN);
+    let screen_h = GetSystemMetrics(SM_CYSCREEN);
+    let x = (screen_w - w) / 2;
+    let y = screen_h - h - (75.0 * k).round() as i32;
+
+    let _ = SetWindowPos(
+        hwnd,
+        None,
+        x,
+        y,
+        w,
+        h,
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    let corner = (28.0 * k).round() as i32;
+    let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, corner, corner);
+    let _ = SetWindowRgn(hwnd, rgn, true);
+}
 
 pub fn is_key_down(vk: i32) -> bool {
     unsafe {
@@ -376,10 +420,10 @@ impl PlatformManager {
 
             let screen_w = GetSystemMetrics(SM_CXSCREEN);
             let screen_h = GetSystemMetrics(SM_CYSCREEN);
-            let hud_w = 280;
-            let hud_h = 58;
-            let hud_x = (screen_w - hud_w) / 2;
-            let hud_y = screen_h - hud_h - 75;
+            // Initial position in design pixels; resize_hud_for_dpi corrects
+            // both the size and the position for the monitor's actual DPI.
+            let hud_x = (screen_w - HUD_DESIGN_W) / 2;
+            let hud_y = screen_h - HUD_DESIGN_H - 75;
 
             let hud_hwnd = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -388,8 +432,8 @@ impl PlatformManager {
                 WS_POPUP,
                 hud_x,
                 hud_y,
-                hud_w,
-                hud_h,
+                HUD_DESIGN_W,
+                HUD_DESIGN_H,
                 None,
                 None,
                 None,
@@ -397,8 +441,14 @@ impl PlatformManager {
             )
             .unwrap_or_default();
 
-            let rgn = CreateRoundRectRgn(0, 0, hud_w + 1, hud_h + 1, 28, 28);
-            let _ = SetWindowRgn(hud_hwnd, rgn, true);
+            // Size the HUD for the actual monitor DPI (HiDPI laptop screens)
+            // and keep the rounded region in sync.
+            if hud_hwnd.0 as isize != 0 {
+                resize_hud_for_dpi(hud_hwnd);
+            } else {
+                let rgn = CreateRoundRectRgn(0, 0, HUD_DESIGN_W + 1, HUD_DESIGN_H + 1, 28, 28);
+                let _ = SetWindowRgn(hud_hwnd, rgn, true);
+            }
 
             HUD_HWND.store(hud_hwnd.0 as isize, Ordering::SeqCst);
 
@@ -1192,6 +1242,35 @@ unsafe extern "system" fn hud_wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_ERASEBKGND => LRESULT(1), // Prevent flicker
+        WM_DPICHANGED => {
+            // Per-Monitor-V2: the window moved to a monitor with a different
+            // DPI. The suggested rectangle (lParam) already carries the
+            // correct scaled size; adopt it and refresh the rounded region.
+            let new_dpi = ((w_param.0 >> 16) & 0xFFFF) as u32;
+            if new_dpi >= 96 {
+                HUD_DPI.store(new_dpi, Ordering::SeqCst);
+            }
+            let rect_ptr = l_param.0 as *const RECT;
+            if !rect_ptr.is_null() {
+                let rect = *rect_ptr;
+                let w = rect.right - rect.left;
+                let h = rect.bottom - rect.top;
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    rect.left,
+                    rect.top,
+                    w,
+                    h,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                let corner = (28.0 * hud_scale()).round() as i32;
+                let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, corner, corner);
+                let _ = SetWindowRgn(hwnd, rgn, true);
+                let _ = InvalidateRect(hwnd, None, false);
+            }
+            LRESULT(0)
+        }
         WM_TIMER => {
             HUD_TICK.fetch_add(1, Ordering::SeqCst);
             let _ = InvalidateRect(hwnd, None, false);
@@ -1210,13 +1289,34 @@ unsafe extern "system" fn hud_wnd_proc(
             let mem_bmp = CreateCompatibleBitmap(hdc, width, height);
             let old_bmp = SelectObject(mem_dc, mem_bmp);
 
+            // HiDPI: the drawing below is authored in 96-DPI design pixels.
+            // Scale the whole back buffer by the monitor DPI factor so the
+            // HUD keeps its intended size on 125%-200% laptop screens.
+            // (TextOut/RoundRect/brushes all honour the world transform;
+            // BitBlt below is unaffected and copies 1:1.)
+            let k = hud_scale();
+            if k != 1.0 {
+                let _ = SetGraphicsMode(mem_dc, GM_ADVANCED);
+                let xf = XFORM {
+                    eM11: k,
+                    eM12: 0.0,
+                    eM21: 0.0,
+                    eM22: k,
+                    eDx: 0.0,
+                    eDy: 0.0,
+                };
+                let _ = SetWorldTransform(mem_dc, &xf);
+            }
+            let design_w = (width as f32 / k).round() as i32;
+            let design_h = (height as f32 / k).round() as i32;
+
             // 1. Draw rounded dark glass capsule
             let card_brush = CreateSolidBrush(COLORREF(0x001B120B)); // Deep obsidian slate
             let card_pen = CreatePen(PS_SOLID, 1, COLORREF(0x004A3622)); // Subtle glass border
             let old_brush = SelectObject(mem_dc, card_brush);
             let old_pen = SelectObject(mem_dc, card_pen);
 
-            let _ = RoundRect(mem_dc, 0, 0, width, height, 28, 28);
+            let _ = RoundRect(mem_dc, 0, 0, design_w, design_h, 28, 28);
 
             let _ = SelectObject(mem_dc, old_brush);
             let _ = SelectObject(mem_dc, old_pen);
@@ -1299,7 +1399,7 @@ unsafe extern "system" fn hud_wnd_proc(
                 0,
                 0,
                 0,
-                0,
+                u32::from(DEFAULT_CHARSET.0),
                 0,
                 0,
                 0,
@@ -1318,6 +1418,9 @@ unsafe extern "system" fn hud_wnd_proc(
             // Active Provider Badge
             let badge_str = HUD_BADGE.lock().unwrap_or_else(|e| e.into_inner()).clone();
             if !badge_str.is_empty() {
+                // Note: the badge is drawn with GDI TextOutW, which does no
+                // font fallback. Segoe UI has no U+26A1 (⚡) — the emoji used
+                // to render as a tofu box (□) on Windows, so it is omitted.
                 let badge_font = CreateFontW(
                     11,
                     0,
@@ -1327,7 +1430,7 @@ unsafe extern "system" fn hud_wnd_proc(
                     0,
                     0,
                     0,
-                    0,
+                    u32::from(DEFAULT_CHARSET.0),
                     0,
                     0,
                     0,
@@ -1336,7 +1439,7 @@ unsafe extern "system" fn hud_wnd_proc(
                 );
                 let old_font2 = SelectObject(mem_dc, badge_font);
                 let _ = SetTextColor(mem_dc, COLORREF(0x00F8C006)); // Electric Cyan
-                let wide_badge: Vec<u16> = format!("⚡ {}", badge_str).encode_utf16().collect();
+                let wide_badge: Vec<u16> = badge_str.encode_utf16().collect();
                 let _ = TextOutW(mem_dc, 34, 33, &wide_badge);
                 let _ = SelectObject(mem_dc, old_font2);
                 let _ = DeleteObject(badge_font);

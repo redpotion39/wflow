@@ -207,7 +207,11 @@ pub fn tr(lang: Lang, en: &'static str) -> &'static str {
         "Casual & Friendly (Chat and messaging tone)" => "เป็นกันเอง (โทนแชทและข้อความ)",
         "Changes on this page apply after pressing Save All Preferences" => "การเปลี่ยนแปลงในหน้านี้จะมีผลหลังกดบันทึกการตั้งค่า",
         "Check every:" => "ตรวจสอบทุก:",
-        "Check for updates automatically at startup" => "ตรวจหาอัปเดตอัตโนมัติเมื่อเปิดโปรแกรม",
+        "Check for new versions in the background" => "ตรวจหาเวอร์ชันใหม่ให้อัตโนมัติระหว่างใช้งาน",
+        "Install new versions automatically" => "ติดตั้งเวอร์ชันใหม่ให้อัตโนมัติ",
+        "Downloads the release for this platform, verifies its checksum, then restarts Wflow. It waits until you are not dictating." => {
+            "ดาวน์โหลดเวอร์ชันสำหรับระบบของคุณ ตรวจสอบ checksum แล้วเริ่ม Wflow ใหม่อัตโนมัติ โดยจะรอจนคุณหยุดพูดก่อน"
+        }
         "Check now" => "ตรวจสอบเดี๋ยวนี้",
         "Checked against GitHub Releases" => "ตรวจสอบผ่าน GitHub Releases",
         "Checked automatically every 15 minutes and at startup (configurable in Settings)" => "ตรวจอัตโนมัติทุก 15 นาทีและเมื่อเปิดโปรแกรม (ตั้งค่าได้ในหน้าตั้งค่า)",

@@ -174,6 +174,14 @@ pub struct AppConfig {
     /// Automatically look for new releases.
     #[serde(default = "default_true")]
     pub check_updates: bool,
+    /// Install a new release as soon as one is found, without a click.
+    ///
+    /// The app sits in the tray and can run for weeks without a restart, so a
+    /// button that has to be noticed is not an update. The install still
+    /// verifies the release checksum, and the helper process restarts the new
+    /// build. It never fires in the middle of a dictation.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
     #[serde(default)]
     pub include_prerelease: bool,
     #[serde(default = "default_update_interval")]
@@ -339,6 +347,7 @@ impl Default for AppConfig {
             share_context: true,
             store_textbox_contents: false,
             check_updates: true,
+            auto_update: true,
             include_prerelease: false,
             update_check_interval_hours: default_update_interval(),
             last_update_check: None,

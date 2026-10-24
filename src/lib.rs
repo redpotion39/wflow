@@ -5,6 +5,7 @@ pub mod grpc;
 pub mod gui;
 pub mod http;
 pub mod i18n;
+pub mod icons;
 pub mod instance;
 pub mod lang;
 pub mod paths;
