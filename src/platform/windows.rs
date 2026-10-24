@@ -7,10 +7,9 @@ use windows::core::Interface;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateBitmap, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
-    CreatePen, CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint,
-    InvalidateRect, RoundRect, SelectObject, SetBkMode, SetGraphicsMode, SetTextColor,
-    SetWindowRgn, SetWorldTransform, TextOutW, DEFAULT_CHARSET, FW_BOLD, FW_NORMAL, GM_ADVANCED,
-    PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT, XFORM,
+    CreatePen, CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect,
+    InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TextOutW,
+    DEFAULT_CHARSET, FW_BOLD, FW_NORMAL, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -1281,34 +1280,35 @@ unsafe extern "system" fn hud_wnd_proc(
             let mem_bmp = CreateCompatibleBitmap(hdc, width, height);
             let old_bmp = SelectObject(mem_dc, mem_bmp);
 
-            // HiDPI: the drawing below is authored in 96-DPI design pixels.
-            // Scale the whole back buffer by the monitor DPI factor so the
-            // HUD keeps its intended size on 125%-200% laptop screens.
-            // (TextOut/RoundRect/brushes all honour the world transform;
-            // BitBlt below is unaffected and copies 1:1.)
+            // HiDPI: the drawing below is authored in 96-DPI design pixels and
+            // every coordinate is multiplied by the monitor scale. The world
+            // transform used to do this, but it silently failed to scale the
+            // drawing on some machines: the capsule stayed 280x58 inside a
+            // 350x73 window and the rest of the back buffer showed through as
+            // a white block. Explicit scaling cannot be ignored by the driver.
             let k = hud_scale();
-            if k != 1.0 {
-                let _ = SetGraphicsMode(mem_dc, GM_ADVANCED);
-                let xf = XFORM {
-                    eM11: k,
-                    eM12: 0.0,
-                    eM21: 0.0,
-                    eM22: k,
-                    eDx: 0.0,
-                    eDy: 0.0,
-                };
-                let _ = SetWorldTransform(mem_dc, &xf);
-            }
-            let design_w = (width as f32 / k).round() as i32;
-            let design_h = (height as f32 / k).round() as i32;
+            let s = |v: f32| (v * k).round() as i32;
+
+            let full = RECT {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            };
 
             // 1. Draw rounded dark glass capsule
             let card_brush = CreateSolidBrush(COLORREF(0x001B120B)); // Deep obsidian slate
             let card_pen = CreatePen(PS_SOLID, 1, COLORREF(0x004A3622)); // Subtle glass border
+
+            // Paint the whole client area first. The rounded window region
+            // clips the corners, so anything outside the capsule is invisible,
+            // and no undefined back-buffer pixels can ever leak through.
+            let _ = FillRect(mem_dc, &full, card_brush);
+
             let old_brush = SelectObject(mem_dc, card_brush);
             let old_pen = SelectObject(mem_dc, card_pen);
-
-            let _ = RoundRect(mem_dc, 0, 0, design_w, design_h, 28, 28);
+            let radius = s(28.0).max(1);
+            let _ = RoundRect(mem_dc, 0, 0, width, height, radius, radius);
 
             let _ = SelectObject(mem_dc, old_brush);
             let _ = SelectObject(mem_dc, old_pen);
@@ -1344,18 +1344,21 @@ unsafe extern "system" fn hud_wnd_proc(
             let null_pen = CreatePen(PS_NULL, 0, COLORREF(0));
             let old_pen_prev = SelectObject(mem_dc, null_pen);
 
+            let dot_x = s(19.0);
+            let dot_y = s(29.0);
+
             // Draw outer aura ring when active
             if state == 1 || state == 2 {
                 let pulse = (tick as f32 * 0.22).sin().abs();
-                let aura_r = 7 + (pulse * 3.5) as i32;
+                let aura_r = s(7.0 + pulse * 3.5).max(1);
                 let aura_brush = CreateSolidBrush(aura_color);
                 let old_b = SelectObject(mem_dc, aura_brush);
                 let _ = RoundRect(
                     mem_dc,
-                    19 - aura_r,
-                    29 - aura_r,
-                    19 + aura_r,
-                    29 + aura_r,
+                    dot_x - aura_r,
+                    dot_y - aura_r,
+                    dot_x + aura_r,
+                    dot_y + aura_r,
                     aura_r * 2,
                     aura_r * 2,
                 );
@@ -1364,15 +1367,15 @@ unsafe extern "system" fn hud_wnd_proc(
             }
 
             // Draw inner core circle
-            let core_r = 4;
+            let core_r = s(4.0).max(1);
             let core_brush = CreateSolidBrush(core_color);
             let old_b2 = SelectObject(mem_dc, core_brush);
             let _ = RoundRect(
                 mem_dc,
-                19 - core_r,
-                29 - core_r,
-                19 + core_r,
-                29 + core_r,
+                dot_x - core_r,
+                dot_y - core_r,
+                dot_x + core_r,
+                dot_y + core_r,
                 core_r * 2,
                 core_r * 2,
             );
@@ -1381,9 +1384,9 @@ unsafe extern "system" fn hud_wnd_proc(
             let _ = SelectObject(mem_dc, old_pen_prev);
             let _ = DeleteObject(null_pen);
 
-            // Status Text (Segoe UI Bold 15px)
+            // Status Text (Segoe UI Bold, 15 design pixels)
             let font = CreateFontW(
-                15,
+                s(15.0).max(1),
                 0,
                 0,
                 0,
@@ -1402,7 +1405,7 @@ unsafe extern "system" fn hud_wnd_proc(
             let _ = SetTextColor(mem_dc, COLORREF(0x00FFFFFF));
 
             let wide_label: Vec<u16> = label_text.encode_utf16().collect();
-            let _ = TextOutW(mem_dc, 34, 11, &wide_label);
+            let _ = TextOutW(mem_dc, s(34.0), s(11.0), &wide_label);
 
             let _ = SelectObject(mem_dc, old_font);
             let _ = DeleteObject(font);
@@ -1414,7 +1417,7 @@ unsafe extern "system" fn hud_wnd_proc(
                 // font fallback. Segoe UI has no U+26A1 (⚡) — the emoji used
                 // to render as a tofu box (□) on Windows, so it is omitted.
                 let badge_font = CreateFontW(
-                    11,
+                    s(11.0).max(1),
                     0,
                     0,
                     0,
@@ -1432,7 +1435,7 @@ unsafe extern "system" fn hud_wnd_proc(
                 let old_font2 = SelectObject(mem_dc, badge_font);
                 let _ = SetTextColor(mem_dc, COLORREF(0x00F8C006)); // Electric Cyan
                 let wide_badge: Vec<u16> = badge_str.encode_utf16().collect();
-                let _ = TextOutW(mem_dc, 34, 33, &wide_badge);
+                let _ = TextOutW(mem_dc, s(34.0), s(33.0), &wide_badge);
                 let _ = SelectObject(mem_dc, old_font2);
                 let _ = DeleteObject(badge_font);
             }
@@ -1440,10 +1443,10 @@ unsafe extern "system" fn hud_wnd_proc(
             // 3. Right Animated Waveform (9 balanced spectrum bars)
             if state == 1 || state == 2 {
                 let bar_count = 9;
-                let start_x = 164;
-                let bar_w = 4;
-                let gap = 6;
-                let center_y = 29;
+                let start_x = s(164.0);
+                let bar_w = s(4.0).max(1);
+                let gap = s(6.0).max(1);
+                let center_y = s(29.0);
 
                 let bar_color = if state == 1 {
                     COLORREF(0x00F8C006) // Electric Cyan
@@ -1469,7 +1472,7 @@ unsafe extern "system" fn hud_wnd_proc(
                         (phase.sin() * 0.5 + 0.5) * 8.0 * bell + 2.0
                     };
 
-                    let half_h = wave as i32;
+                    let half_h = s(wave).max(1);
                     let _ = RoundRect(
                         mem_dc,
                         bx,
