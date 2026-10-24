@@ -453,10 +453,7 @@ fn spawn_update_watchdog(runtime: &tokio::runtime::Handle, state: AppState) {
                 "Auto-update: installing v{} in the background.",
                 info.latest
             );
-            state.set_toast(&format!(
-                "พบเวอร์ชันใหม่ v{} กำลังอัปเดตให้อัตโนมัติ",
-                info.latest
-            ));
+            state.set_toast(&format!("พบเวอร์ชันใหม่ v{} กำลังอัปเดตให้อัตโนมัติ", info.latest));
             install_pending_update(&state, info).await;
         }
     });

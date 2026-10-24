@@ -110,7 +110,10 @@ fn icon_pill(
     let icon_w = if icon.is_some() { size + 6.0 } else { 0.0 };
     let pad_x = 9.0;
     let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(galley.size().x + icon_w + pad_x * 2.0, galley.size().y + 8.0),
+        Vec2::new(
+            galley.size().x + icon_w + pad_x * 2.0,
+            galley.size().y + 8.0,
+        ),
         Sense::hover(),
     );
     ui.painter()
@@ -215,8 +218,7 @@ fn icon_button_small(
     } else {
         fill
     };
-    ui.painter()
-        .rect_filled(rect, Rounding::same(7.0), bg);
+    ui.painter().rect_filled(rect, Rounding::same(7.0), bg);
     ui.painter().rect_stroke(
         rect,
         Rounding::same(7.0),
@@ -1675,11 +1677,9 @@ impl WisprFlowGui {
                             let (prov_badge, mic_label) = {
                                 let cfg = lock(&self.state.config);
                                 let prov_badge = match cfg.stt_provider {
-                                    SttProvider::WisprFlow => (
-                                        Icon::Bolt,
-                                        "Wispr Flow",
-                                        Color32::from_rgb(129, 140, 248),
-                                    ),
+                                    SttProvider::WisprFlow => {
+                                        (Icon::Bolt, "Wispr Flow", Color32::from_rgb(129, 140, 248))
+                                    }
                                     SttProvider::Groq => (
                                         Icon::Activity,
                                         "Groq Whisper",
@@ -1719,8 +1719,8 @@ impl WisprFlowGui {
                                                 .color(prov_badge.2)
                                                 .strong(),
                                         );
-                                        let (icon_rect, _) =
-                                            ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                                        let (icon_rect, _) = ui
+                                            .allocate_exact_size(Vec2::splat(12.0), Sense::hover());
                                         crate::icons::draw(
                                             ui.painter(),
                                             icon_rect.center(),
@@ -1748,8 +1748,8 @@ impl WisprFlowGui {
                                                 .font(FontId::proportional(10.5))
                                                 .color(Color32::from_rgb(203, 213, 225)),
                                         );
-                                        let (icon_rect, _) =
-                                            ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                                        let (icon_rect, _) = ui
+                                            .allocate_exact_size(Vec2::splat(12.0), Sense::hover());
                                         crate::icons::draw(
                                             ui.painter(),
                                             icon_rect.center(),
@@ -1958,8 +1958,7 @@ impl WisprFlowGui {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 9.0;
-                    let (icon_rect, _) =
-                        ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
                     crate::icons::draw(
                         ui.painter(),
                         Pos2::new(icon_rect.center().x, icon_rect.min.y + 10.0),
@@ -2005,8 +2004,7 @@ impl WisprFlowGui {
                     Color32::WHITE,
                 );
                 let q_w = q_galley.size().x + 14.0 + 8.0 + 22.0;
-                let (q_rect, q_resp) =
-                    ui.allocate_exact_size(Vec2::new(q_w, 30.0), Sense::click());
+                let (q_rect, q_resp) = ui.allocate_exact_size(Vec2::new(q_w, 30.0), Sense::click());
                 let q_rect = q_rect.shrink(0.5);
                 ui.painter().rect_filled(
                     q_rect,
@@ -2094,9 +2092,11 @@ impl WisprFlowGui {
 
                 // Paint the pill background first, then the icon and text.
                 let status_label = shape_thai(&status_text).to_string();
-                let status_galley = ui
-                    .painter()
-                    .layout_no_wrap(status_label.clone(), FontId::proportional(12.0), fg_color);
+                let status_galley = ui.painter().layout_no_wrap(
+                    status_label.clone(),
+                    FontId::proportional(12.0),
+                    fg_color,
+                );
                 let (status_rect, _) = ui.allocate_exact_size(
                     status_galley.size() + egui::vec2(34.0, 12.0),
                     Sense::hover(),
@@ -3410,10 +3410,7 @@ impl WisprFlowGui {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new(format!(
-                            "🔄  {}",
-                            tr(lang, "Wflow Software Update")
-                        ))
+                        egui::RichText::new(format!("🔄  {}", tr(lang, "Wflow Software Update")))
                             .font(FontId::proportional(14.0))
                             .color(Color32::WHITE)
                             .strong(),
@@ -3438,7 +3435,10 @@ impl WisprFlowGui {
                     )
                 } else if let Some(info) = pending.as_ref() {
                     (
-                        format!("🎉 {}", tr1(lang, "New version v{} available", &info.latest)),
+                        format!(
+                            "🎉 {}",
+                            tr1(lang, "New version v{} available", &info.latest)
+                        ),
                         Color32::WHITE,
                         Color32::from_rgb(22, 163, 74),
                         Color32::from_rgb(74, 222, 128),
@@ -3467,8 +3467,7 @@ impl WisprFlowGui {
                     status_color,
                 );
                 let pill_size = galley.size() + egui::vec2(22.0, 12.0);
-                let (pill_rect, _) =
-                    ui.allocate_exact_size(pill_size, egui::Sense::hover());
+                let (pill_rect, _) = ui.allocate_exact_size(pill_size, egui::Sense::hover());
                 ui.painter()
                     .rect_filled(pill_rect, Rounding::same(10.0), status_fill);
                 ui.painter().rect_stroke(
@@ -3511,10 +3510,7 @@ impl WisprFlowGui {
                         // The primary action installs the update inside the
                         // app: download → checksum → replace → restart.
                         let install_label = if install_running {
-                            format!(
-                                "⏳ {}",
-                                tr1(lang, "Installing v{}...", &info.latest)
-                            )
+                            format!("⏳ {}", tr1(lang, "Installing v{}...", &info.latest))
                         } else {
                             format!("⬇️ {}", tr1(lang, "Install v{}", &info.latest))
                         };
@@ -3536,10 +3532,7 @@ impl WisprFlowGui {
 
                     if ui
                         .button(format!("🌐 {}", tr(lang, "Open Releases page")))
-                        .on_hover_text(tr(
-                            lang,
-                            "Open the GitHub Releases page in your browser",
-                        ))
+                        .on_hover_text(tr(lang, "Open the GitHub Releases page in your browser"))
                         .clicked()
                     {
                         let _ = self.event_tx.send(GuiEvent::OpenUrl(format!(
@@ -3582,9 +3575,7 @@ impl WisprFlowGui {
                         crate::updater::InstallStage::Installing => {
                             tr(lang, "Installing update...")
                         }
-                        crate::updater::InstallStage::Restarting => {
-                            tr(lang, "Restarting Wflow...")
-                        }
+                        crate::updater::InstallStage::Restarting => tr(lang, "Restarting Wflow..."),
                         _ => tr(lang, "Working..."),
                     };
                     ui.label(
@@ -3592,9 +3583,11 @@ impl WisprFlowGui {
                             .font(FontId::proportional(11.5))
                             .color(Color32::from_rgb(148, 163, 184)),
                     );
-                    ui.add(egui::ProgressBar::new(install_state.percent as f32 / 100.0)
-                        .desired_width(ui.available_width())
-                        .fill(Color32::from_rgb(34, 197, 94)));
+                    ui.add(
+                        egui::ProgressBar::new(install_state.percent as f32 / 100.0)
+                            .desired_width(ui.available_width())
+                            .fill(Color32::from_rgb(34, 197, 94)),
+                    );
                 }
 
                 ui.add_space(12.0);
@@ -3626,10 +3619,7 @@ impl WisprFlowGui {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui
-                            .button(format!(
-                                "📝 {}",
-                                tr(lang, "View Release Notes on GitHub")
-                            ))
+                            .button(format!("📝 {}", tr(lang, "View Release Notes on GitHub")))
                             .clicked()
                         {
                             let _ = self
@@ -3665,8 +3655,8 @@ impl WisprFlowGui {
                         "• {}",
                         tr1(lang, "Current version: v{}", current)
                     ))
-                        .font(FontId::proportional(11.5))
-                        .color(Color32::from_rgb(203, 213, 225)),
+                    .font(FontId::proportional(11.5))
+                    .color(Color32::from_rgb(203, 213, 225)),
                 );
                 ui.label(
                     egui::RichText::new(format!(
@@ -5595,10 +5585,7 @@ impl WisprFlowGui {
                     // A galley is drawn from its top-left corner, so shift it
                     // up by half its height to sit on the pill's centre line.
                     painter.galley(
-                        Pos2::new(
-                            badge_x,
-                            pill.center().y - badge_galley.size().y / 2.0,
-                        ),
+                        Pos2::new(badge_x, pill.center().y - badge_galley.size().y / 2.0),
                         badge_galley.clone(),
                         Color32::from_rgb(148, 163, 184),
                     );
@@ -5627,10 +5614,7 @@ impl WisprFlowGui {
                         label_galley
                     };
                     painter.galley(
-                        Pos2::new(
-                            label_x,
-                            pill.center().y - label_galley.size().y / 2.0,
-                        ),
+                        Pos2::new(label_x, pill.center().y - label_galley.size().y / 2.0),
                         label_galley,
                         Color32::WHITE,
                     );

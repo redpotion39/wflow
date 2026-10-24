@@ -55,8 +55,7 @@ fn main() {
             );
             let manifest_path = out_dir.join("wflow.manifest");
             std::fs::write(&manifest_path, &manifest_xml).unwrap();
-            let manifest_rc_path =
-                format!("{}", manifest_path.display()).replace('\\', "\\\\");
+            let manifest_rc_path = format!("{}", manifest_path.display()).replace('\\', "\\\\");
 
             let rc_content = format!(
                 r#"

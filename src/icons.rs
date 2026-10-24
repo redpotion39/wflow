@@ -52,11 +52,17 @@ pub fn draw(painter: &egui::Painter, center: Pos2, size: f32, color: Color32, ic
     let stroke = Stroke::new((size / 15.0).max(0.9), color);
 
     let poly = |coords: &[(f32, f32)]| {
-        let pts: Vec<Pos2> = coords.iter().map(|(x, y)| grid(center, s, *x, *y)).collect();
+        let pts: Vec<Pos2> = coords
+            .iter()
+            .map(|(x, y)| grid(center, s, *x, *y))
+            .collect();
         painter.add(Shape::line(pts, stroke));
     };
     let seg = |a: (f32, f32), b: (f32, f32)| {
-        painter.line_segment([grid(center, s, a.0, a.1), grid(center, s, b.0, b.1)], stroke);
+        painter.line_segment(
+            [grid(center, s, a.0, a.1), grid(center, s, b.0, b.1)],
+            stroke,
+        );
     };
     let circle = |c: (f32, f32), r: f32| {
         painter.circle_stroke(grid(center, s, c.0, c.1), r * s, stroke);
@@ -75,7 +81,7 @@ pub fn draw(painter: &egui::Painter, center: Pos2, size: f32, color: Color32, ic
     // Curves are approximated with short segments, which stays crisp at the
     // 12-18 px sizes these icons are drawn at.
     let arc = |c: (f32, f32), r: f32, a0: f32, a1: f32| {
-        let steps = ((a1 - a0).abs() / ((std::f32::consts::PI / 12.0))).ceil() as usize + 2;
+        let steps = ((a1 - a0).abs() / (std::f32::consts::PI / 12.0)).ceil() as usize + 2;
         let pts: Vec<Pos2> = (0..=steps)
             .map(|k| {
                 let a = a0 + (a1 - a0) * k as f32 / steps as f32;
@@ -94,7 +100,12 @@ pub fn draw(painter: &egui::Painter, center: Pos2, size: f32, color: Color32, ic
         }
         Icon::History => {
             // Clock face with an open gap and a rewind arrow at the top left.
-            arc((12.0, 12.5), 8.2, 1.58 * std::f32::consts::PI, 2.92 * std::f32::consts::PI);
+            arc(
+                (12.0, 12.5),
+                8.2,
+                1.58 * std::f32::consts::PI,
+                2.92 * std::f32::consts::PI,
+            );
             poly(&[(3.2, 3.4), (3.2, 8.4), (8.2, 8.4)]);
             poly(&[(12.0, 8.6), (12.0, 12.5), (15.4, 14.2)]);
         }
@@ -126,7 +137,16 @@ pub fn draw(painter: &egui::Painter, center: Pos2, size: f32, color: Color32, ic
             seg((20.0, 10.5), (20.0, 13.5));
         }
         Icon::FileText => {
-            poly(&[(14.0, 3.0), (6.0, 3.0), (6.0, 21.0), (18.0, 21.0), (18.0, 7.0), (14.0, 3.0), (14.0, 7.0), (18.0, 7.0)]);
+            poly(&[
+                (14.0, 3.0),
+                (6.0, 3.0),
+                (6.0, 21.0),
+                (18.0, 21.0),
+                (18.0, 7.0),
+                (14.0, 3.0),
+                (14.0, 7.0),
+                (18.0, 7.0),
+            ]);
             seg((9.0, 13.0), (15.0, 13.0));
             seg((9.0, 17.0), (13.0, 17.0));
         }
@@ -136,7 +156,15 @@ pub fn draw(painter: &egui::Painter, center: Pos2, size: f32, color: Color32, ic
             dot((12.0, 12.0), 1.5);
         }
         Icon::Bolt => {
-            poly(&[(13.2, 2.4), (4.8, 13.6), (11.4, 13.6), (10.2, 21.6), (19.2, 10.4), (12.6, 10.4), (13.2, 2.4)]);
+            poly(&[
+                (13.2, 2.4),
+                (4.8, 13.6),
+                (11.4, 13.6),
+                (10.2, 21.6),
+                (19.2, 10.4),
+                (12.6, 10.4),
+                (13.2, 2.4),
+            ]);
         }
         Icon::Clock => {
             circle((12.0, 12.0), 8.4);
@@ -206,7 +234,14 @@ pub fn draw(painter: &egui::Painter, center: Pos2, size: f32, color: Color32, ic
             dot((12.0, 17.0), 0.9);
         }
         Icon::Activity => {
-            poly(&[(2.4, 12.8), (7.0, 12.8), (10.2, 4.8), (13.8, 19.2), (16.8, 12.8), (21.6, 12.8)]);
+            poly(&[
+                (2.4, 12.8),
+                (7.0, 12.8),
+                (10.2, 4.8),
+                (13.8, 19.2),
+                (16.8, 12.8),
+                (21.6, 12.8),
+            ]);
         }
         Icon::Flatline => {
             seg((3.5, 12.0), (20.5, 12.0));

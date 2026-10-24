@@ -25,6 +25,7 @@ use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, 
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationValuePattern, UIA_ValuePatternId,
 };
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     VK_CONTROL, VK_V,
@@ -33,7 +34,6 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NOTIFYICONDATAW,
 };
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, FindWindowW, GetClassNameW,
@@ -43,12 +43,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, HICON,
     HWND_TOP, ICONINFO, IDI_APPLICATION, IMAGE_ICON, KBDLLHOOKSTRUCT, LR_DEFAULTCOLOR, MF_CHECKED,
     MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, SM_CXSCREEN, SM_CXSMICON, SM_CYSCREEN, SM_CYSMICON,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE,
-    SW_SHOW, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL,
-    WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP,
-    WM_SETICON, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE,
+    SW_SHOW, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL, WINDOW_EX_STYLE,
+    WM_APP, WM_CLOSE, WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETICON,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
 };
 
 use crate::ui::DictationStatus;
@@ -121,15 +121,7 @@ unsafe fn resize_hud_for_dpi(hwnd: HWND) {
     let x = (screen_w - w) / 2;
     let y = screen_h - h - (75.0 * k).round() as i32;
 
-    let _ = SetWindowPos(
-        hwnd,
-        None,
-        x,
-        y,
-        w,
-        h,
-        SWP_NOZORDER | SWP_NOACTIVATE,
-    );
+    let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     let corner = (28.0 * k).round() as i32;
     let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, corner, corner);
     let _ = SetWindowRgn(hwnd, rgn, true);
