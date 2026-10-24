@@ -162,6 +162,7 @@ fn main() -> Result<()> {
     }
 
     info!("Wflow shut down cleanly.");
+    PlatformManager::stop_hotkey_listener();
     Ok(())
 }
 
@@ -498,7 +499,14 @@ async fn install_pending_update(state: &AppState, info: UpdateInfo) {
             info!("Update to v{} installed successfully.", info.latest);
             state.set_toast(&format!("ติดตั้ง v{} แล้ว กำลังเริ่มใหม่", info.latest));
             // Quit so the helper can start the new build.
+            PlatformManager::set_quitting(true);
             state.pending_quit.store(true, Ordering::SeqCst);
+            request_repaint(&state);
+            PlatformManager::close_main_window();
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_millis(2000));
+                std::process::exit(0);
+            });
         }
         Err(err) => {
             warn!("Update installation failed: {err:#}");
@@ -1435,8 +1443,21 @@ async fn run_background_coordinator(
                     }
                     Some(HotkeyEvent::QuitApp) => {
                         info!("Quit requested from tray/menu; shutting down gracefully.");
+                        PlatformManager::set_quitting(true);
                         state.pending_quit.store(true, Ordering::SeqCst);
                         request_repaint(&state);
+                        PlatformManager::close_main_window();
+
+                        if session.is_active() {
+                            session.finish(&state, &db).await;
+                        }
+
+                        std::thread::spawn(|| {
+                            std::thread::sleep(Duration::from_millis(2000));
+                            info!("Graceful exit timeout reached, terminating process.");
+                            std::process::exit(0);
+                        });
+                        break;
                     }
                     None => break,
                 }

@@ -39,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, FindWindowW, GetClassNameW,
     GetClientRect, GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics,
     GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, KillTimer, LoadCursorW, LoadIconW,
-    LoadImageW, PostQuitMessage, RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow,
+    LoadImageW, PostMessageW, PostQuitMessage, RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow,
     SetTimer, SetWindowPos, SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage,
     UnhookWindowsHookEx, HICON, HTCLIENT, HWND_TOP, ICONINFO, IDC_HAND, IDI_APPLICATION,
     IMAGE_ICON, KBDLLHOOKSTRUCT, LR_DEFAULTCOLOR, MA_NOACTIVATE, MF_CHECKED, MF_SEPARATOR,
@@ -89,6 +89,7 @@ static HOTKEY_COMBO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32
 static TOGGLE_WINDOW_COMBO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x78); // Default F9 (single)
 static RECORDING_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0); // 0=None, 1=Dictate, 2=ToggleWindow
 static RECORDING_NON_MOD_PRESSED: AtomicBool = AtomicBool::new(false);
+static IS_QUITTING: AtomicBool = AtomicBool::new(false);
 static TRAY_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static HUD_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static HUD_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0); // 0=Hidden, 1=Listening, 2=Transcribing, 3=Done
@@ -864,6 +865,37 @@ impl PlatformManager {
         }
     }
 
+    /// Sends WM_CLOSE to the main GUI window to trigger graceful shutdown
+    pub fn close_main_window() {
+        unsafe {
+            if let Some(hwnd) = Self::find_main_window_hwnd() {
+                info!("Sending WM_CLOSE to GUI window (HWND {:?})", hwnd);
+                let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+            } else {
+                warn!("Could not find GUI window to send WM_CLOSE");
+            }
+        }
+    }
+
+    /// Stops the background hotkey listener thread and removes the tray icon
+    pub fn stop_hotkey_listener() {
+        unsafe {
+            let val = TRAY_HWND.load(Ordering::SeqCst);
+            if val != 0 {
+                let hwnd = HWND(val as *mut core::ffi::c_void);
+                let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+
+    pub fn is_quitting() -> bool {
+        IS_QUITTING.load(Ordering::SeqCst)
+    }
+
+    pub fn set_quitting(quitting: bool) {
+        IS_QUITTING.store(quitting, Ordering::SeqCst);
+    }
+
     /// Finds the HWND of the main GUI window
     pub fn find_main_window_hwnd() -> Option<HWND> {
         unsafe {
@@ -899,6 +931,8 @@ impl PlatformManager {
                     let class_str = String::from_utf16_lossy(&class_name[..len as usize]);
                     if !class_str.contains("WisprFlowTrayMsg")
                         && !class_str.contains("WflowTrayMsg")
+                        && !class_str.contains("WisprFlowFloatingHud")
+                        && !class_str.contains("WflowFloatingHud")
                     {
                         (*p).found = Some(hwnd);
                         return windows::Win32::Foundation::BOOL(0);
@@ -1061,11 +1095,18 @@ unsafe extern "system" fn tray_wnd_proc(
                 } else if cmd.0 == 2 {
                     PlatformManager::hide_main_window();
                 } else if cmd.0 == 3 {
+                    info!("Quit requested from system tray context menu.");
+                    PlatformManager::set_quitting(true);
                     if let Ok(guard) = HOOK_TX.lock() {
                         if let Some(tx) = guard.as_ref() {
                             let _ = tx.send(HotkeyEvent::QuitApp);
                         }
                     }
+                    PlatformManager::close_main_window();
+                    std::thread::spawn(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(2000));
+                        std::process::exit(0);
+                    });
                     PostQuitMessage(0);
                 } else if cmd.0 == 5 {
                     if let Ok(guard) = HOOK_TX.lock() {
@@ -1088,11 +1129,17 @@ unsafe extern "system" fn tray_wnd_proc(
     }
     if msg == WM_CLOSE || msg == WM_ENDSESSION {
         info!("Tray window received WM_CLOSE / WM_ENDSESSION, shutting down...");
+        PlatformManager::set_quitting(true);
         if let Ok(guard) = HOOK_TX.lock() {
             if let Some(tx) = guard.as_ref() {
                 let _ = tx.send(HotkeyEvent::QuitApp);
             }
         }
+        PlatformManager::close_main_window();
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(2000));
+            std::process::exit(0);
+        });
         PostQuitMessage(0);
         return LRESULT(0);
     }

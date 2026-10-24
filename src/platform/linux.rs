@@ -437,7 +437,23 @@ fn run_hotkey_loop(tx: &mpsc::UnboundedSender<HotkeyEvent>) -> anyhow::Result<()
     }
 }
 
+static IS_QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub struct PlatformManager;
+
+impl PlatformManager {
+    pub fn is_quitting() -> bool {
+        IS_QUITTING.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_quitting(quitting: bool) {
+        IS_QUITTING.store(quitting, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn close_main_window() {}
+
+    pub fn stop_hotkey_listener() {}
+}
 
 impl PlatformManager {
     pub fn get_active_app_context() -> ActiveAppContext {

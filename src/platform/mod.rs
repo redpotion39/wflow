@@ -59,6 +59,18 @@ pub mod mock {
     pub struct PlatformManager;
 
     impl PlatformManager {
+        pub fn is_quitting() -> bool {
+            false
+        }
+
+        pub fn set_quitting(_quitting: bool) {}
+
+        pub fn close_main_window() {}
+
+        pub fn stop_hotkey_listener() {}
+    }
+
+    impl PlatformManager {
         pub fn get_active_app_context() -> ActiveAppContext {
             ActiveAppContext::default()
         }

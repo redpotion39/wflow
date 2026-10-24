@@ -1136,13 +1136,17 @@ impl eframe::App for WisprFlowGui {
             )
         };
 
-        if self.state.pending_quit.load(Ordering::SeqCst) {
+        if self.state.pending_quit.load(Ordering::SeqCst) || crate::platform::PlatformManager::is_quitting() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
 
         // Window close [X] -> minimize to tray or show exit confirmation modal
         if ctx.input(|i| i.viewport().close_requested()) {
+            if self.state.pending_quit.load(Ordering::SeqCst) || crate::platform::PlatformManager::is_quitting() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
             if self.settings_close_to_tray {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 #[cfg(target_os = "windows")]
@@ -5859,7 +5863,12 @@ impl WisprFlowGui {
         if do_exit {
             self.show_exit_confirmation = false;
             self.state.pending_quit.store(true, Ordering::SeqCst);
+            crate::platform::PlatformManager::set_quitting(true);
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(2000));
+                std::process::exit(0);
+            });
         } else if do_tray {
             self.show_exit_confirmation = false;
             #[cfg(target_os = "windows")]
